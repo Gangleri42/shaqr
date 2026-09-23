@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -16,6 +17,7 @@ import (
 	"testing"
 
 	"github.com/Gangleri42/shaqr"
+	"github.com/Gangleri42/shaqr/descriptor"
 )
 
 // export is the descriptor of testdata/vectors.json as an exporter might
@@ -26,10 +28,11 @@ const export = "wsh(sortedmulti(2," +
 	"[28645006/48h/0h/0h/2h]xpub6DnEBNkSJKBYQmsbhS1sP9cNdtU5c9PLFGCjTJmxicxc13WB8zNNGQazabQpyFAGW5bV9tMko4uBxDxjUKL6dSAcx1tEbgEHtgSqyRsekh6," +
 	"[73C5DA0A/48h/0h/0h/2h]xpub6DkFAXWQ2dHxq2vatrt9qyA3bXYU4ToWQwCHbf5XB2mSTexcHZCeKS1VZYcPoBd5X8yVcbXFHJR9R8UCVpt82VX1VhR28mCyxUFL4r6KFrf/<0;1>/*))"
 
-// vector returns the descriptor set of testdata/vectors.json: the
-// canonical descriptor, the tag of its set and the text of its shares 1
+// vector returns the descriptor set of testdata/vectors.json in the
+// format given, "sealed" or "open": the canonical descriptor that its
+// packed payload holds, the tag of the set and the text of its shares 1
 // to 3.
-func vector(t *testing.T) (desc, tag string, plates []string) {
+func vector(t *testing.T, format string) (desc, tag string, plates []string) {
 	t.Helper()
 	data, err := os.ReadFile("../../testdata/vectors.json")
 	if err != nil {
@@ -38,6 +41,7 @@ func vector(t *testing.T) (desc, tag string, plates []string) {
 	var v struct {
 		Valid []struct {
 			Type    string   `json:"type"`
+			Format  string   `json:"format"`
 			Payload string   `json:"payload_hex"`
 			Tag     string   `json:"tag"`
 			Shares  []string `json:"shares"`
@@ -47,15 +51,19 @@ func vector(t *testing.T) (desc, tag string, plates []string) {
 		t.Fatal(err)
 	}
 	for _, c := range v.Valid {
-		if c.Type == "D" {
+		if c.Type == "D" && c.Format == format {
 			payload, err := hex.DecodeString(c.Payload)
 			if err != nil {
 				t.Fatal(err)
 			}
-			return string(payload), c.Tag, c.Shares
+			desc, err := descriptor.Unpack(payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return desc, c.Tag, c.Shares
 		}
 	}
-	t.Fatal("no descriptor in the vectors")
+	t.Fatalf("no %s descriptor set in the vectors", format)
 	return "", "", nil
 }
 
@@ -99,37 +107,75 @@ const (
 	bare = "xpub6D4BDPcP2GT577Vvch3R8wDkScZWzQzMMUm3PWbmWvVJrZwQY4VUNgqFJPMM3No2dFDFGTsxxpG5uJh7n7epu4trkrX7x7DogT5Uv6fcLW5"
 )
 
+// Split cuts the sets of testdata/vectors.json from the export, sealed
+// by default and open with -open, with share sizes as DESCRIPTOR.md
+// Sizes gives them, and recover prints the canonical descriptor from any
+// two of their plates.
 func TestSplitRecover(t *testing.T) {
-	desc, tag, plates := vector(t)
-	out, reports, err := descbackup("", "split", export)
-	if err != nil {
-		t.Fatalf("split: %v", err)
-	}
-	want := "# 2-of-3, set " + tag + ", 285 bytes per share\n" +
-		"# share 1 of set " + tag + " (2-of-3), key [28645006]\n" + plates[0] + "\n" +
-		"# share 2 of set " + tag + " (2-of-3), key [73c5da0a]\n" + plates[1] + "\n" +
-		"# share 3 of set " + tag + " (2-of-3), key [b8688df1]\n" + plates[2] + "\n"
-	if out != want {
-		t.Errorf("split printed\n%s\nwant\n%s", out, want)
-	}
-	// The export has no checksum, so split asks the user to compare.
-	if !strings.HasPrefix(reports, "warning: the descriptor has no checksum") || !strings.HasSuffix(reports, "\n"+desc+"\n") {
-		t.Errorf("split reports %q", reports)
-	}
-	again, reports, _ := descbackup("", "split", "-k", "2", "-n", "3", desc)
-	if again != out || reports != "" {
-		t.Errorf("split of the canonical form with -k and -n printed\n%s\nand reported %q", again, reports)
-	}
-
-	for _, input := range []string{
-		out,
-		plates[0] + "\n" + plates[1],
-		plates[2] + "\n" + plates[0],
-		plates[1] + " " + plates[2] + " " + plates[1],
+	for _, c := range []struct {
+		format string
+		flags  []string
+		size   int
+	}{
+		{"sealed", nil, 182},
+		{"open", []string{"-open"}, 150},
 	} {
-		got, reports, err := descbackup(input, "recover")
-		if err != nil || reports != "" || got != desc+"\n" {
-			t.Errorf("recover = %q, %q, %v", got, reports, err)
+		desc, tag, plates := vector(t, c.format)
+		out, reports, err := descbackup("", append(append([]string{"split"}, c.flags...), export)...)
+		if err != nil {
+			t.Fatalf("split %q: %v", c.flags, err)
+		}
+		set := fmt.Sprintf("set %s (2-of-3, %s)", tag, c.format)
+		want := fmt.Sprintf("# %s, %d bytes per share\n", set, c.size) +
+			"# share 1 of " + set + ", key [28645006]\n" + plates[0] + "\n" +
+			"# share 2 of " + set + ", key [73c5da0a]\n" + plates[1] + "\n" +
+			"# share 3 of " + set + ", key [b8688df1]\n" + plates[2] + "\n"
+		if out != want {
+			t.Errorf("split %q printed\n%s\nwant\n%s", c.flags, out, want)
+		}
+		// The export has no checksum, so split asks the user to compare.
+		if !strings.HasPrefix(reports, "warning: the descriptor has no checksum") || !strings.HasSuffix(reports, "\n"+desc+"\n") {
+			t.Errorf("split %q reports %q", c.flags, reports)
+		}
+		again, reports, _ := descbackup("", append(append([]string{"split"}, c.flags...), "-k", "2", "-n", "3", desc)...)
+		if again != out || reports != "" {
+			t.Errorf("split %q of the canonical form with -k and -n printed\n%s\nand reported %q", c.flags, again, reports)
+		}
+
+		for _, input := range []string{
+			out,
+			plates[0] + "\n" + plates[1],
+			plates[2] + "\n" + plates[0],
+			plates[1] + " " + plates[2] + " " + plates[1],
+		} {
+			got, reports, err := descbackup(input, "recover")
+			if err != nil || reports != "" || got != desc+"\n" {
+				t.Errorf("recover of the %s set = %q, %q, %v", c.format, got, reports, err)
+			}
+		}
+	}
+}
+
+// Split -open refuses a descriptor that holds a private key, since every
+// plate of an open set shows part of it. A sealed set takes it.
+func TestSplitOpenPrivate(t *testing.T) {
+	const (
+		xprv = "[aabbccdd/84h/0h/0h]xprv9s21ZrQH143K3QTDL4LXw2F7HEK3wJUD2nW2nRk4stbPy6cq3jPPqjiChkVvvNKmPGJxWUtg6LnF5kejMRNNU3TGtRBeJgk33yuGBxrMPHi"
+		wif  = "5HueCGU8rMjxEXxiPuD5BDku4MkFqeZyd4dZ1jvhTVqvbTLvyTJ"
+		// The same key, compressed.
+		wifC = "KwdMAjGmerYanjeui5SHS7JkmpZvVipYvB2LJGU1ZxJwYvP98617"
+	)
+	for _, args := range [][]string{
+		{"wsh(sortedmulti(2," + xprv + "/<0;1>/*," + bare + "))"},
+		{"-k", "2", "-n", "2", "tr(" + bare + ",multi_a(2," + wif + "," + bare + "/7/*))"},
+		{"-k", "2", "-n", "2", "tr(" + bare + ",pk(musig(" + wifC + "," + bare + ")))"},
+	} {
+		if _, _, err := descbackup("", append([]string{"split"}, args...)...); err != nil {
+			t.Errorf("split %.60q: %v", args, err)
+		}
+		_, _, err := descbackup("", append([]string{"split", "-open"}, args...)...)
+		if err == nil || !strings.Contains(err.Error(), "holds a private key") {
+			t.Errorf("split -open %.60q: %v", args, err)
 		}
 	}
 }
@@ -137,7 +183,7 @@ func TestSplitRecover(t *testing.T) {
 // Split reads the descriptor from standard input when no argument, or
 // "-", gives it, and explains itself with -h.
 func TestSplitInput(t *testing.T) {
-	_, _, plates := vector(t)
+	_, _, plates := vector(t, "sealed")
 	want, _, _ := descbackup("", "split", export)
 	for _, args := range [][]string{{"split"}, {"split", "-"}, {"split", "-k", "2", "-n", "3", "-"}} {
 		out, _, err := descbackup(" "+export+"\n", args...)
@@ -150,7 +196,7 @@ func TestSplitInput(t *testing.T) {
 	}
 	for _, args := range [][]string{{"split", "-h"}, {"-h"}, {"help"}} {
 		out, _, err := descbackup("", args...)
-		if err != nil || !strings.Contains(out, "-k K  the number of plates needed to recover") {
+		if err != nil || !strings.Contains(out, "-k K   the number of plates needed to recover") {
 			t.Errorf("%q: %v\n%s", args, err, out)
 		}
 	}
@@ -194,14 +240,14 @@ func TestSplitThreshold(t *testing.T) {
 	// A descriptor that does not say which key goes with which share
 	// takes k and n from the flags and labels no keys.
 	out, _, err = descbackup("", "split", "-k", "2", "-n", "3", "tr("+key+",sortedmulti_a(2,"+bare+","+bare[:len(bare)-1]+"6))")
-	if err != nil || !strings.Contains(out, " (2-of-3)\nSHAQR:") || strings.Contains(out, "key") {
+	if err != nil || !strings.Contains(out, " (2-of-3, sealed)\nSHAQR:") || strings.Contains(out, "key") {
 		t.Errorf("split of a tr() = %v\n%s", err, out)
 	}
 
 	// A key without an origin is named by its last 8 characters, without
 	// the children that the canonical form gives it.
 	out, _, err = descbackup("", "split", "wsh(multi(2,"+key+","+bare+"))")
-	if err != nil || !strings.Contains(out, " (2-of-2), key [d34db33f]\n") || !strings.Contains(out, " (2-of-2), key ...Uv6fcLW5\n") {
+	if err != nil || !strings.Contains(out, " (2-of-2, sealed), key [d34db33f]\n") || !strings.Contains(out, " (2-of-2, sealed), key ...Uv6fcLW5\n") {
 		t.Errorf("split with a bare key = %v\n%s", err, out)
 	}
 }
@@ -237,7 +283,7 @@ func TestSplitKeys(t *testing.T) {
 // damaged. Each is reported by the line it starts on, and none stops the
 // recovery.
 func TestRecoverDamaged(t *testing.T) {
-	desc, tag, plates := vector(t)
+	desc, tag, plates := vector(t, "sealed")
 	foreign, err := shaqr.Split([]byte("another wallet"), shaqr.TypeText, 2, 3)
 	if err != nil {
 		t.Fatal(err)
@@ -266,7 +312,7 @@ func TestRecoverDamaged(t *testing.T) {
 // decodes or not, the report names the character and its line, and the
 // rest of the share is reported as base32 outside every share.
 func TestRecoverCutShort(t *testing.T) {
-	_, tag, plates := vector(t)
+	_, tag, plates := vector(t, "sealed")
 	for _, c := range []struct {
 		at   int // base32 characters before the stray 8
 		want string
@@ -287,7 +333,7 @@ func TestRecoverCutShort(t *testing.T) {
 // Input without a share says so, and a plate typed without its prefix
 // is pointed out.
 func TestRecoverNoShares(t *testing.T) {
-	desc, _, plates := vector(t)
+	desc, _, plates := vector(t, "sealed")
 	for _, c := range []struct {
 		input, reports string
 	}{
@@ -303,7 +349,7 @@ func TestRecoverNoShares(t *testing.T) {
 		}
 	}
 	_, reports, _ := descbackup(plates[0]+"\n# plate 2\n"+wrap(strings.ToLower(plates[1][6:])), "recover")
-	if !strings.HasPrefix(reports, "lines 3 to 25 hold base32 outside every share") {
+	if !strings.HasPrefix(reports, "lines 3 to 16 hold base32 outside every share") {
 		t.Errorf("a plate without its prefix after another plate: %q", reports)
 	}
 }
@@ -311,7 +357,7 @@ func TestRecoverNoShares(t *testing.T) {
 // A share that passes its check and is off the set is named by its line.
 // Where two texts claim one x, the id decides between them.
 func TestRecoverWrongShares(t *testing.T) {
-	desc, tag, plates := vector(t)
+	desc, tag, plates := vector(t, "sealed")
 	forged := reseal(t, plates[2], 60)
 	out, reports, err := descbackup(plates[0]+"\n"+plates[1]+"\n"+forged, "recover")
 	if err != nil || out != desc+"\n" || reports != "set "+tag+": share 3, on line 3, is wrong and should be replaced\n" {
@@ -352,7 +398,7 @@ func TestRecoverWrongShares(t *testing.T) {
 
 // A set short of k says which shares it has, and which were given twice.
 func TestRecoverShort(t *testing.T) {
-	_, tag, plates := vector(t)
+	_, tag, plates := vector(t, "sealed")
 	_, reports, err := descbackup(plates[0]+"\n"+plates[0], "recover")
 	want := "set " + tag + ": 1 of 2 shares: have share 1 (given twice, on lines 1 and 2); add another plate of this set\n"
 	if err == nil || reports != want {
@@ -372,25 +418,33 @@ func TestRecoverShort(t *testing.T) {
 	}
 }
 
-// A set that recovers and does not hold a descriptor with its checksum
-// is reported, and the other sets are recovered all the same.
+// A set that recovers and does not hold a packed descriptor is reported,
+// and the other sets are recovered all the same.
 func TestRecoverNotADescriptor(t *testing.T) {
-	desc, _, plates := vector(t)
+	desc, _, plates := vector(t, "sealed")
+	packed, err := descriptor.Pack(desc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	notPacked := "the payload unpacks to a descriptor that packs to other bytes, so it is not the packed form DESCRIPTOR.md gives"
 	good := plates[0] + "\n" + plates[1] + "\n"
 	for _, c := range []struct {
 		typ     byte
-		payload string
+		payload []byte
 		err     string
 	}{
-		{shaqr.TypeText, desc, "it holds a text note (type U), not a descriptor"},
-		{shaqr.TypeBytes, desc, "it holds bytes (type B), not a descriptor"},
-		{'Z', desc, "it holds content of type 0x5A, not a descriptor"},
-		{shaqr.TypeDescriptor, desc[:len(desc)-9], "the descriptor has no checksum"},
-		{shaqr.TypeDescriptor, desc[:len(desc)-1] + "q", "the descriptor's checksum does not match"},
+		{shaqr.TypeText, packed, "it holds a text note (type U), not a descriptor"},
+		{shaqr.TypeBytes, packed, "it holds bytes (type B), not a descriptor"},
+		{'Z', packed, "it holds content of type 0x5A, not a descriptor"},
+		// The text, as Draft 3 held it, fails the repack check.
+		{shaqr.TypeDescriptor, []byte(desc), notPacked},
+		{shaqr.TypeDescriptor, []byte(desc[:len(desc)-9]), notPacked},
+		// An origin token with nothing after its marker.
+		{shaqr.TypeDescriptor, append(bytes.Clone(packed), 0x91), "the payload is not a packed descriptor"},
 		// Nothing of the payload goes into the report.
-		{shaqr.TypeDescriptor, "pässword-hunter2#zzz", "the payload is not a descriptor"},
+		{shaqr.TypeDescriptor, []byte("pässword-hunter2"), "the payload is not a packed descriptor"},
 	} {
-		shares, err := shaqr.Split([]byte(c.payload), c.typ, 2, 2)
+		shares, err := shaqr.Split(c.payload, c.typ, 2, 2)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -406,7 +460,7 @@ func TestRecoverNotADescriptor(t *testing.T) {
 // Several sets: recover says which output line is which set, and
 // replace names them.
 func TestSeveralSets(t *testing.T) {
-	desc, tag, plates := vector(t)
+	desc, tag, plates := vector(t, "sealed")
 	other, _, err := descbackup("", "split", "wsh(multi(2,"+key+","+bare+"))")
 	if err != nil {
 		t.Fatal(err)
@@ -415,26 +469,39 @@ func TestSeveralSets(t *testing.T) {
 	h, _ := shaqr.ParseHeader(raws[0])
 	input := plates[0] + "\n" + plates[1] + "\n" + other
 	out, reports, err := descbackup(input, "recover")
-	want := "line 1 of the output: set " + tag + " (2-of-3)\nline 2 of the output: set " + h.Tag() + " (2-of-2)\n"
+	want := "line 1 of the output: set " + tag + " (2-of-3, sealed)\nline 2 of the output: set " + h.Tag() + " (2-of-2, sealed)\n"
 	if err != nil || !strings.HasPrefix(out, desc+"\nwsh(multi(2,") || reports != want {
 		t.Errorf("recover of two sets = %q, %q, %v", out, reports, err)
 	}
 	_, _, err = descbackup(input, "replace", "2")
-	if want := "2 sets have enough shares: " + tag + " (2-of-3) and " + h.Tag() + " (2-of-2); give one set at a time"; err == nil || err.Error() != want {
+	if want := "2 sets have enough shares: " + tag + " (2-of-3, sealed) and " + h.Tag() + " (2-of-2, sealed); give one set at a time"; err == nil || err.Error() != want {
 		t.Errorf("replace with two sets: %v", err)
+	}
+
+	// The sealed and the open set of one wallet stay apart, and each
+	// gives the descriptor.
+	_, openTag, open := vector(t, "open")
+	out, reports, err = descbackup(plates[0]+"\n"+open[1]+"\n"+plates[1]+"\n"+open[0], "recover")
+	want = "line 1 of the output: set " + tag + " (2-of-3, sealed)\nline 2 of the output: set " + openTag + " (2-of-3, open)\n"
+	if err != nil || out != desc+"\n"+desc+"\n" || reports != want {
+		t.Errorf("recover of the sealed and the open set = %q, %q, %v", out, reports, err)
 	}
 }
 
 func TestReplace(t *testing.T) {
-	_, tag, plates := vector(t)
-	out, reports, err := descbackup(plates[2]+"\n"+plates[0], "replace", "2")
-	if want := "# share 2 of set " + tag + " (2-of-3), key [73c5da0a]\n" + plates[1] + "\n"; err != nil || reports != "" || out != want {
-		t.Errorf("replace 2 = %q, %q, %v", out, reports, err)
+	for _, format := range []string{"sealed", "open"} {
+		_, tag, plates := vector(t, format)
+		out, reports, err := descbackup(plates[2]+"\n"+plates[0], "replace", "2")
+		want := "# share 2 of set " + tag + " (2-of-3, " + format + "), key [73c5da0a]\n" + plates[1] + "\n"
+		if err != nil || reports != "" || out != want {
+			t.Errorf("replace 2 of the %s set = %q, %q, %v", format, out, reports, err)
+		}
 	}
 
 	// A fourth share goes on no key's plate.
-	out, reports, err = descbackup(plates[0]+"\n"+plates[1], "replace", "4")
-	if err != nil || !strings.HasPrefix(out, "# share 4 of set "+tag+" (2-of-3)\nSHAQR:") ||
+	_, tag, plates := vector(t, "sealed")
+	out, reports, err := descbackup(plates[0]+"\n"+plates[1], "replace", "4")
+	if err != nil || !strings.HasPrefix(out, "# share 4 of set "+tag+" (2-of-3, sealed)\nSHAQR:") ||
 		reports != "share 4 goes on no key's plate: the descriptor has 3 keys, so it is an extra plate of set "+tag+"\n" {
 		t.Errorf("replace 4 = %q, %q, %v", out, reports, err)
 	}
@@ -475,7 +542,7 @@ func (u unread) Read([]byte) (int, error) {
 // Plates engraved in text alone: every share wrapped at 20 characters
 // with its label above it, read back in any case.
 func TestTextOnly(t *testing.T) {
-	desc, _, _ := vector(t)
+	desc, _, _ := vector(t, "sealed")
 	out, _, err := descbackup("", "split", export)
 	if err != nil {
 		t.Fatal(err)
@@ -522,27 +589,29 @@ func TestUsage(t *testing.T) {
 // Every line split prints that is not a share is a label: it starts with
 // "#" and is part of no share, in either case.
 func TestLabels(t *testing.T) {
-	_, _, plates := vector(t)
-	out, _, err := descbackup("", "split", export)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var labels []string
-	for _, line := range strings.Split(strings.TrimSuffix(out, "\n"), "\n") {
-		if !strings.HasPrefix(line, "SHAQR:") {
-			labels = append(labels, line)
+	for _, format := range []string{"sealed", "open"} {
+		_, _, plates := vector(t, format)
+		out, _, err := descbackup("", "split", "-open="+fmt.Sprint(format == "open"), export)
+		if err != nil {
+			t.Fatal(err)
 		}
-	}
-	for _, line := range labels {
-		if !strings.HasPrefix(line, "#") {
-			t.Errorf("label %q does not start with #", line)
+		var labels []string
+		for _, line := range strings.Split(strings.TrimSuffix(out, "\n"), "\n") {
+			if !strings.HasPrefix(line, "SHAQR:") {
+				labels = append(labels, line)
+			}
 		}
-	}
-	if raws, rejected := shaqr.Decode(strings.Join(labels, "\n")); raws != nil || rejected != nil {
-		t.Errorf("labels alone decode to %x, %v", raws, rejected)
-	}
-	want, _ := shaqr.Decode(strings.Join(plates, "\n"))
-	if raws, rejected := shaqr.Decode(strings.ToLower(out)); rejected != nil || !reflect.DeepEqual(raws, want) {
-		t.Errorf("split output in lower case decodes to %x, %v", raws, rejected)
+		for _, line := range labels {
+			if !strings.HasPrefix(line, "#") {
+				t.Errorf("label %q does not start with #", line)
+			}
+		}
+		if raws, rejected := shaqr.Decode(strings.Join(labels, "\n")); raws != nil || rejected != nil {
+			t.Errorf("labels alone decode to %x, %v", raws, rejected)
+		}
+		want, _ := shaqr.Decode(strings.Join(plates, "\n"))
+		if raws, rejected := shaqr.Decode(strings.ToLower(out)); rejected != nil || !reflect.DeepEqual(raws, want) {
+			t.Errorf("split output of the %s set in lower case decodes to %x, %v", format, raws, rejected)
+		}
 	}
 }

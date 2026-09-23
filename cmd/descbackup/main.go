@@ -4,41 +4,48 @@
 // plates and recovers it from any quorum of them, as DESCRIPTOR.md
 // describes.
 //
-//	descbackup split [-k K] [-n N] [DESCRIPTOR]
+//	descbackup split [-open] [-k K] [-n N] [DESCRIPTOR]
 //	descbackup recover < plates.txt
 //	descbackup replace X < plates.txt
 //
-// Split puts the descriptor in canonical form and cuts a derived set of
-// it, so that every run cuts the same plates from the same wallet. It
-// takes the descriptor from its argument, or from standard input when
-// there is none or it is "-", which keeps the keys out of the shell's
-// history. It reads k and n from a descriptor whose keys all sit in one
-// multi, sortedmulti, multi_a or sortedmulti_a, and labels share x with
-// the x-th key. For any other descriptor give -k, the size of the
-// smallest group of keys that can spend, and -n, and assign the plates
-// yourself. It checks the origin and the path of every key, and warns
-// when the descriptor has no checksum, since then nothing shows that it
-// is the wallet's. A 1-of-n descriptor makes no set: split prints the
-// canonical descriptor, which goes on every plate as it is. Every other
-// line it prints that is not a share starts with "#".
+// Split puts the descriptor in canonical form, packs it and cuts a
+// derived set of it, so that every run cuts the same plates from the
+// same wallet. With -open it cuts an open set instead, whose plates are
+// 32 bytes shorter and each show part of the descriptor. It refuses to
+// cut an open set of a descriptor that holds a private key. It takes the
+// descriptor from its argument, or from standard input when there is
+// none or it is "-", which keeps the keys out of the shell's history. It
+// reads k and n from a descriptor whose keys all sit in one multi,
+// sortedmulti, multi_a or sortedmulti_a, and labels share x with the
+// x-th key and with the format of its set, sealed or open. For any other
+// descriptor give -k, the size of the smallest group of keys that can
+// spend, and -n, and assign the plates yourself. It checks the origin
+// and the path of every key, and warns when the descriptor has no
+// checksum, since then nothing shows that it is the wallet's. A 1-of-n
+// descriptor makes no set: split prints the canonical descriptor, which
+// goes on every plate as it is. Every other line it prints that is not a
+// share starts with "#".
 //
 // Recover and replace read standard input as one text, as it was
 // scanned or typed from the plates: in any case, wrapped over lines,
 // with labels between the shares. They report every share they leave
 // out and why, by the line it starts on, and every set they hold too few
-// shares of, and carry on without them. Recover prints the descriptor of
-// every set it holds k shares of, byte for byte. Replace prints share X
-// of the one set it holds k shares of, to cut a lost plate again or add
-// one.
+// shares of, and carry on without them. Recover unpacks the descriptor
+// of every set it holds k shares of and prints it with its checksum,
+// byte for byte. Replace prints share X of the one set it holds k shares
+// of, to cut a lost plate again or add one.
 package main
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"crypto/subtle"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log"
+	"math/big"
 	"os"
 	"regexp"
 	"slices"
@@ -52,7 +59,7 @@ import (
 
 // errUsage reports a command line that names no command or gives one the
 // wrong arguments.
-var errUsage = errors.New(`usage: descbackup split [-k K] [-n N] [DESCRIPTOR]
+var errUsage = errors.New(`usage: descbackup split [-open] [-k K] [-n N] [DESCRIPTOR]
        descbackup recover < plates.txt
        descbackup replace X < plates.txt
        descbackup -h`)
@@ -61,15 +68,20 @@ var errUsage = errors.New(`usage: descbackup split [-k K] [-n N] [DESCRIPTOR]
 const help = `Descbackup splits a multisig wallet descriptor across the signers' seed
 plates and recovers it from any quorum of them (DESCRIPTOR.md).
 
-descbackup split [-k K] [-n N] [DESCRIPTOR]
+descbackup split [-open] [-k K] [-n N] [DESCRIPTOR]
     Print the plates: a label and a share for each key of the descriptor.
-    The descriptor comes from the argument, or from standard input when
-    there is none or it is "-". Flags go before it.
+    The shares form a sealed set: below k plates, they show nothing of the
+    descriptor to anyone who lacks one of its keys. The descriptor comes
+    from the argument, or from standard input when there is none or it is
+    "-". Flags go before it.
 
-    -k K  the number of plates needed to recover: the smallest group of
-          keys that can spend. Give it, and -n, when the keys are not all
-          in one multi, sortedmulti, multi_a or sortedmulti_a.
-    -n N  the number of plates to make.
+    -open  cut an open set: every plate is 32 bytes shorter and shows
+           part of the descriptor, whole public keys among it. Not for a
+           descriptor that holds a private key.
+    -k K   the number of plates needed to recover: the smallest group of
+           keys that can spend. Give it, and -n, when the keys are not
+           all in one multi, sortedmulti, multi_a or sortedmulti_a.
+    -n N   the number of plates to make.
 
 descbackup recover < plates.txt
     Print the descriptor of every set the text holds enough shares of,
@@ -117,10 +129,12 @@ func run(args []string, in io.Reader, out io.Writer, logger *log.Logger) error {
 }
 
 // splitCmd prints the plates of a descriptor backup: a derived set of the
-// canonical descriptor, each share under a label.
+// packed canonical descriptor, or an open set of it with -open, each
+// share under a label.
 func splitCmd(args []string, in io.Reader, out io.Writer, logger *log.Logger) error {
 	fs := flag.NewFlagSet("split", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
+	openSet := fs.Bool("open", false, "cut an open set")
 	k := fs.Int("k", 0, "shares needed to recover")
 	n := fs.Int("n", 0, "shares to make")
 	switch err := fs.Parse(args); {
@@ -154,6 +168,9 @@ func splitCmd(args []string, in io.Reader, out io.Writer, logger *log.Logger) er
 	if err := checkKeys(desc); err != nil {
 		return err
 	}
+	if *openSet && private(desc) {
+		return errors.New("the descriptor holds a private key, and the plates of an open set would show it: leave out -open")
+	}
 	qk, qn, keys, err := threshold(desc, *k, *n)
 	if err != nil {
 		return err
@@ -167,15 +184,19 @@ func splitCmd(args []string, in io.Reader, out io.Writer, logger *log.Logger) er
 		return nil
 	}
 
-	sp := shaqr.Splitter{Derived: true}
-	shares, err := sp.Split([]byte(desc), shaqr.TypeDescriptor, qk, qn)
+	payload, err := descriptor.Pack(desc)
+	if err != nil {
+		return err
+	}
+	sp := shaqr.Splitter{Derived: !*openSet, Open: *openSet}
+	shares, err := sp.Split(payload, shaqr.TypeDescriptor, qk, qn)
 	if err != nil {
 		return err
 	}
 	h, _ := shaqr.ParseHeader(shares[0])
-	fmt.Fprintf(out, "# %d-of-%d, set %s, %d bytes per share\n", qk, qn, h.Tag(), len(shares[0]))
+	fmt.Fprintf(out, "# set %s (%s), %d bytes per share\n", h.Tag(), summary(h, qn), len(shares[0]))
 	for i, sh := range shares {
-		fmt.Fprintf(out, "%s\n%s\n", label(i+1, h.Tag(), qk, qn, keys), shaqr.Encode(sh))
+		fmt.Fprintf(out, "%s\n%s\n", label(h, i+1, qn, keys), shaqr.Encode(sh))
 	}
 	return nil
 }
@@ -217,6 +238,14 @@ var (
 	childStep = regexp.MustCompile(`^([0-9]+h?|\*h?|<[0-9]+h?(;[0-9]+h?)+>)$`)
 )
 
+// leaves returns the names, numbers, hashes and key expressions of a
+// canonical descriptor: its text without the checksum, cut at every
+// parenthesis, brace and comma.
+func leaves(desc string) []string {
+	body := desc[:strings.LastIndexByte(desc, '#')]
+	return strings.FieldsFunc(body, func(r rune) bool { return strings.ContainsRune("(){},", r) })
+}
+
 // checkKeys makes a light check of every key expression in a canonical
 // descriptor, since package descriptor checks none: an origin
 // fingerprint is 8 hex digits, and every step of a path is a number with
@@ -225,8 +254,7 @@ var (
 // wallet that wallet software would refuse does not go onto the plates.
 // It does not check the keys themselves.
 func checkKeys(desc string) error {
-	body := desc[:strings.LastIndexByte(desc, '#')]
-	for _, leaf := range strings.FieldsFunc(body, func(r rune) bool { return strings.ContainsRune("(){},", r) }) {
+	for _, leaf := range leaves(desc) {
 		// A name, a number, a hash or a key with neither origin nor
 		// children has no [ and no /.
 		if !strings.ContainsAny(leaf, "[/") {
@@ -271,15 +299,78 @@ func badStep(st string) error {
 	return fmt.Errorf("%q is not a step of a path: write a number, with h or ' after it for a hardened step", st)
 }
 
-// label is the line above share x: its set, the quorum of the set and
-// whose plate it goes on, as in "# share 1 of set #E096 (2-of-3), key
-// [0badc0de]". n is 0 when nothing tells it.
-func label(x int, tag string, k, n int, keys []string) string {
-	quorum := fmt.Sprintf("%d-of-%d", k, n)
-	if n == 0 {
-		quorum = fmt.Sprintf("%d needed", k)
+// private reports whether a canonical descriptor holds a private key,
+// which DESCRIPTOR.md never lets into an open set: an extended key whose
+// key starts with a 00 byte, as that of an xprv or tprv does, or a WIF
+// key, a base58check string of 0x80 or 0xEF and 32 bytes, and 01 after
+// them when the key is compressed.
+func private(desc string) bool {
+	for _, leaf := range leaves(desc) {
+		if i := strings.IndexByte(leaf, ']'); i >= 0 {
+			leaf = leaf[i+1:]
+		}
+		key, _, _ := strings.Cut(leaf, "/")
+		raw := base58Check(key)
+		wif := len(raw) == 33 || len(raw) == 34 && raw[33] == 0x01
+		switch {
+		case len(raw) == 78 && raw[45] == 0x00:
+			return true
+		case wif && (raw[0] == 0x80 || raw[0] == 0xEF):
+			return true
+		}
 	}
-	return fmt.Sprintf("# share %d of set %s (%s)%s", x, tag, quorum, plate(keys, x))
+	return false
+}
+
+// base58Alphabet is the alphabet of Bitcoin addresses.
+const base58Alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+
+// base58Check decodes s as base58check, whose last four bytes are the
+// first four of a double SHA-256 of the others, and returns the others.
+// It returns nil when s is not base58 or the check does not match.
+func base58Check(s string) []byte {
+	n := new(big.Int)
+	for i := range len(s) {
+		d := strings.IndexByte(base58Alphabet, s[i])
+		if d < 0 {
+			return nil
+		}
+		n.Mul(n, big.NewInt(58)).Add(n, big.NewInt(int64(d)))
+	}
+	// Every leading 1 stands for a zero byte.
+	raw := append(make([]byte, len(s)-len(strings.TrimLeft(s, "1"))), n.Bytes()...)
+	if len(raw) < 4 {
+		return nil
+	}
+	body := raw[:len(raw)-4]
+	sum := sha256.Sum256(body)
+	sum = sha256.Sum256(sum[:])
+	if !bytes.Equal(sum[:4], raw[len(body):]) {
+		return nil
+	}
+	return body
+}
+
+// label is the line above share x of the set whose header is h: its set,
+// its quorum and format, and whose plate it goes on, as in "# share 1 of
+// set #E096 (2-of-3, sealed), key [0badc0de]". n is 0 when nothing tells
+// it.
+func label(h shaqr.Header, x, n int, keys []string) string {
+	return fmt.Sprintf("# share %d of set %s (%s)%s", x, h.Tag(), summary(h, n), plate(keys, x))
+}
+
+// summary gives the quorum and the format of the set whose header is h,
+// as in "2-of-3, sealed", or "2 needed, open" when n is 0 because
+// nothing tells it.
+func summary(h shaqr.Header, n int) string {
+	format := "sealed"
+	if h.Open {
+		format = "open"
+	}
+	if n == 0 {
+		return fmt.Sprintf("%d needed, %s", h.K, format)
+	}
+	return fmt.Sprintf("%d-of-%d, %s", h.K, n, format)
 }
 
 // plate says whose plate share x goes on: ", key [fp]" with the origin
@@ -322,7 +413,7 @@ func recoverCmd(in io.Reader, out io.Writer, logger *log.Logger) error {
 			failed++
 			continue
 		}
-		fmt.Fprintf(out, "%s\n", r.desc)
+		fmt.Fprintln(out, r.desc)
 		names = append(names, r.name())
 	}
 	if len(names) > 1 {
@@ -373,34 +464,35 @@ func replaceCmd(args []string, in io.Reader, out io.Writer, logger *log.Logger) 
 	if err != nil {
 		return err
 	}
-	_, keys, ok := descriptor.Quorum(string(r.desc))
+	_, keys, ok := descriptor.Quorum(r.desc)
 	n := len(keys)
 	if ok && x > n {
-		logger.Printf("share %d goes on no key's plate: the descriptor has %d keys, so it is an extra plate of set %s", x, n, r.tag)
+		logger.Printf("share %d goes on no key's plate: the descriptor has %d keys, so it is an extra plate of set %s", x, n, r.hdr.Tag())
 	}
-	fmt.Fprintf(out, "%s\n%s\n", label(x, r.tag, r.k, n, keys), shaqr.Encode(sh))
+	fmt.Fprintf(out, "%s\n%s\n", label(r.hdr, x, n, keys), shaqr.Encode(sh))
 	return nil
 }
 
 // A result is a set the input held k shares of, and what it gave: the
-// descriptor and the shares that gave it, or the reason it failed.
+// descriptor and the shares that gave it, or the reason it failed. hdr
+// is the header of its shares.
 type result struct {
-	tag     string
-	k       int
-	desc    []byte
+	hdr     shaqr.Header
+	desc    string
 	solving [][]byte
 	err     error
 }
 
-// name names the set in a message: its tag and its quorum, when its
-// descriptor tells it, as in "#E096 (2-of-3)".
+// name names the set in a message: its tag, its quorum when its
+// descriptor tells it, and its format, as in "#E096 (2-of-3, sealed)".
 func (r result) name() string {
+	n := 0
 	if r.err == nil {
-		if _, keys, ok := descriptor.Quorum(string(r.desc)); ok {
-			return fmt.Sprintf("%s (%d-of-%d)", r.tag, r.k, len(keys))
+		if _, keys, ok := descriptor.Quorum(r.desc); ok {
+			n = len(keys)
 		}
 	}
-	return fmt.Sprintf("%s (%d needed)", r.tag, r.k)
+	return fmt.Sprintf("%s (%s)", r.hdr.Tag(), summary(r.hdr, n))
 }
 
 // recoverSets reads the whole input as one text and recovers every set
@@ -441,17 +533,17 @@ func recoverSets(in io.Reader, logger *log.Logger) ([]result, error) {
 	var results []result
 	for _, set := range sets {
 		h, _ := shaqr.ParseHeader(set[0])
-		r := result{tag: h.Tag(), k: h.K}
+		r := result{hdr: h}
 		r.desc, r.solving, r.err = open(set)
 		var tooFew *shaqr.TooFewError
 		switch {
 		case errors.As(r.err, &tooFew):
-			logger.Printf("set %s: %s", r.tag, p.held(set, tooFew))
+			logger.Printf("set %s: %s", h.Tag(), p.held(set, tooFew))
 			continue
 		case r.err != nil:
-			logger.Printf("set %s: %s", r.tag, failure(set, r.k, r.err))
+			logger.Printf("set %s: %s", h.Tag(), failure(set, h.K, r.err))
 		default:
-			p.audit(r.tag, set, r.solving, logger)
+			p.audit(h.Tag(), set, r.solving, logger)
 		}
 		results = append(results, r)
 	}
@@ -462,13 +554,13 @@ func recoverSets(in io.Reader, logger *log.Logger) ([]result, error) {
 // open tries.
 const maxChoices = 64
 
-// open recovers the descriptor that a set holds and checks it as
+// open recovers the descriptor that a set holds and unpacks it as
 // DESCRIPTOR.md Recovery requires. Where two or more texts claim one x
 // and too few other x values remain, it tries each choice of one text
 // for each such x in turn, up to maxChoices of them, and the id decides
 // (SPEC.md Recovering, step 3). It returns the descriptor and the
 // shares that gave it.
-func open(set [][]byte) (desc []byte, solving [][]byte, err error) {
+func open(set [][]byte) (desc string, solving [][]byte, err error) {
 	desc, err = descriptorOf(shaqr.Combine(set))
 	var tooFew *shaqr.TooFewError
 	if !errors.As(err, &tooFew) || len(tooFew.Disputed) == 0 || len(tooFew.Held)+len(tooFew.Disputed) < tooFew.K {
@@ -480,7 +572,7 @@ func open(set [][]byte) (desc []byte, solving [][]byte, err error) {
 			return d, choice, cerr
 		}
 	}
-	return nil, set, err
+	return "", set, err
 }
 
 // choices returns every set made of the shares of set at undisputed x
@@ -515,31 +607,31 @@ func choices(set [][]byte, disputed []int) [][][]byte {
 }
 
 // descriptorOf checks what Combine recovered as DESCRIPTOR.md Recovery
-// requires: content type D, and a checksum that is present and right.
-func descriptorOf(typ byte, payload []byte, err error) ([]byte, error) {
+// requires: content type D, and a payload that unpacks. It returns the
+// descriptor with the checksum that unpacking computes.
+func descriptorOf(typ byte, payload []byte, err error) (string, error) {
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	switch typ {
 	case shaqr.TypeDescriptor:
 	case shaqr.TypeText:
-		return nil, errors.New("it holds a text note (type U), not a descriptor")
+		return "", errors.New("it holds a text note (type U), not a descriptor")
 	case shaqr.TypeBytes:
-		return nil, errors.New("it holds bytes (type B), not a descriptor")
+		return "", errors.New("it holds bytes (type B), not a descriptor")
 	default:
-		return nil, fmt.Errorf("it holds content of type 0x%02X, not a descriptor", typ)
+		return "", fmt.Errorf("it holds content of type 0x%02X, not a descriptor", typ)
 	}
-	switch err := descriptor.Verify(string(payload)); {
-	case errors.Is(err, descriptor.ErrNoChecksum):
-		return nil, errors.New("the descriptor has no checksum")
-	case errors.Is(err, descriptor.ErrChecksum):
-		return nil, errors.New("the descriptor's checksum does not match")
+	desc, err := descriptor.Unpack(payload)
+	switch {
+	case errors.Is(err, descriptor.ErrNotPacked):
+		return "", errors.New("the payload unpacks to a descriptor that packs to other bytes, so it is not the packed form DESCRIPTOR.md gives")
 	case err != nil:
-		// Verify's other errors quote a character of the payload, which
+		// Unpack's other errors can quote a byte of the payload, which
 		// has no place in a report.
-		return nil, errors.New("the payload is not a descriptor")
+		return "", errors.New("the payload is not a packed descriptor")
 	}
-	return payload, nil
+	return desc, nil
 }
 
 // failure explains why a set that held k shares gave no descriptor.
@@ -610,9 +702,9 @@ func (p *plates) report(rejected []shaqr.Rejected, logger *log.Logger) {
 	}
 }
 
-// disputeKey identifies an x of a set: k, x, id and length.
+// disputeKey identifies an x of a set: format, k, x, id and length.
 func disputeKey(raw []byte) string {
-	return fmt.Sprint(raw[1:19], len(raw))
+	return fmt.Sprint(raw[:19], len(raw))
 }
 
 // name names a share that failed step 1 by the line it starts on, and,
