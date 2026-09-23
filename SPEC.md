@@ -107,8 +107,9 @@ stream(key, len) = first len bytes of the ChaCha20 keystream
 This is ChaCha20 as RFC 8439 section 2.4 defines it, used as a bare stream
 cipher with no Poly1305. The nonce stays fixed because no key encrypts more
 than one message: seed and S both depend on the payload (Splitting, step 2).
-One stream
-holds 2^38 bytes, which bounds L.
+One stream holds 2^38 bytes, which bounds L. An open set uses no stream and
+keeps the same bound, so that every payload a generator accepts fits either
+format.
 
 ## Splitting
 
@@ -126,8 +127,8 @@ empty, and C is sealed itself.
    ```
 
    Add as many zero bytes as it takes to make the length a multiple of k. A
-   generator may add more, k at a time (see Padding). L is the length of
-   sealed and B = L / k.
+   generator of a sealed session set may add more, k at a time (see
+   Padding). L is the length of sealed and B = L / k.
 
 2. Draw the key and the randomness for its shares.
 
@@ -207,7 +208,8 @@ f+B      4      check     SHA-256("shaQR v1 check" ‖ all bytes before)[0:4]
 
 All shares of a set have the same length, at least 56 bytes sealed and 24
 open. n is not recorded because recovery does not need it. x = 0 belongs to
-the key, so a set has at most 255 shares.
+the key in a sealed set and is not used in an open one, so a set has at most
+255 shares.
 
 Tools that label shares or name a set use its tag: the first two bytes of the
 id, written as four upper-case hex digits after a `#`, as in `#B962`.
@@ -248,21 +250,24 @@ mode for the whole text into byte mode at 8 bits per character: the 462
 character share of a 2-of-3 descriptor goes from version 11 to version 15.
 
 Receivers read more loosely, because shares are also typed by hand from
-engraved text that wraps over several lines. They ignore case, in the prefix
-too, and delete white space inside a share; white space is any Unicode white
-space character, such as the non-breaking space that pasted text can carry. A
-share starts after `SHAQR:` and runs to the next `SHAQR:`, to the first
-character that is neither base32 nor white space, or to the end of the input,
-whichever comes first. Its length is not 1, 3 or 6 modulo 8. The unused low
-bits of the last character are written as zero and ignored when read. Text
-outside shares is not part of any share and is ignored.
+engraved text that wraps over several lines. They ignore ASCII case, in the
+prefix too: a to z read as A to Z, and no other character is folded. They
+delete white space inside a share. White space is any character with the
+Unicode White_Space property, such as the non-breaking space that pasted
+text can carry: U+0009 to U+000D, U+0020, U+0085, U+00A0, U+1680, U+2000 to
+U+200A, U+2028, U+2029, U+202F, U+205F and U+3000. A share starts after
+`SHAQR:` and runs to the next `SHAQR:`, to the first character that is
+neither base32 nor white space, or to the end of the input, whichever comes
+first. Its length is not 1, 3 or 6 modulo 8. The unused low bits of the
+last character are written as zero and ignored when read. Text outside
+shares is not part of any share and is ignored.
 
 Because a share runs on across white space, a label printed next to it starts
 with a character outside base32 in either case, such as the `#` of a tag, so
 that the two stay apart when typed.
 
-A share whose text does not decode is reported like one that fails check. It
-never stops the recovery of other shares.
+A share whose text does not decode is dropped and reported, like one that
+fails check. It never stops the recovery of other shares.
 
 A share is one string. A carrier that cannot hold it whole splits and rejoins
 it in its own framing, and the format does not see that. PIECES.md describes
@@ -274,18 +279,23 @@ A holder may keep the shares of several sets in one place, so a recovery may
 be handed shares of more than one set.
 
 1. Decode each share and verify check. Drop the share if it does not decode
-   or check does not match; a share too short to hold a check fails it.
-   Report a share whose check matches and whose format is neither `0x01` nor
-   `0x02` as made by another version, and leave it out. Then drop, and
-   report, a sealed share shorter than 56 bytes or an open one shorter than
-   24, a share with x = 0, and a share with k below 2.
+   or check does not match; a share too short to hold a check fails it. A
+   share of four bytes is a check alone and has no format byte; drop and
+   report it as too short. Report a longer share whose check matches and
+   whose format is neither `0x01` nor `0x02` as made by another version, and
+   leave it out. Then drop, and report, a sealed share shorter than 56
+   bytes or an open one shorter than 24, a share with x = 0, and a share
+   with k below 2.
 2. Group shares by format, k, id and length. Shares in different groups belong
    to different sets and are never combined. A group short of k is reported,
    for example as "1 of 2 shares", and does not hold up the others.
 3. Wait for k distinct x values in one group. If two or more shares in a
    group have the same x and differ, report x as disputed and leave them all
-   out. Recovery goes on if k other x values remain. If fewer do, the receiver
-   may try each in turn, and the id decides.
+   out of the interpolation. Once the id has passed, compare each of them
+   with the recovered polynomials like any other held share, and report the
+   ones that disagree as bad (see Finding a bad share). Recovery goes on if
+   k other x values remain. If fewer do, the receiver may try each in turn,
+   and the id decides.
 4. Interpolate.
 
    ```
@@ -367,12 +377,12 @@ descriptor made of extended public keys.
 ### Padding
 
 Any share shows L, and so the length of the payload to within k bytes. For a
-password that is worth hiding. A generator may accept a minimum length for
-sealed and add zero bytes until it is reached, keeping L a multiple of k.
-Recovery strips them without being told. A derived set gets only the zero
-bytes that sealing (Splitting, step 1) requires, so that it stays a function
-of T, the payload and k. An open set shows its payload anyway and takes no
-padding either.
+password that is worth hiding. A generator of a sealed set may accept a
+minimum for L, the length of `sealed`, and add zero bytes until L reaches it,
+keeping L a multiple of k. Recovery strips them without being told. A
+derived set gets only the zero bytes that sealing (Splitting, step 1)
+requires, so that it stays a function of T, the payload and k. An open set
+shows its payload anyway and takes no padding either.
 
 ### Open sets
 
@@ -459,11 +469,11 @@ text chars  = 6 + ceil(8 * share bytes / 5)
 
 Share bytes, text characters and QR version for a sealed and an open set.
 QR versions are for alphanumeric mode at error level L. For comparison, the
-last column is a Shamir share of the payload with the same 9 bytes of type,
-terminator, header and check, in the same text form.
+last column is the QR version of a Shamir share of the payload with the same
+9 bytes of type, terminator, header and check, in the same text form.
 
 ```
-payload                  split      sealed           open             Shamir
+payload                  split      sealed           open             Shamir QR
 TOTP seed, 20 bytes      2-of-3      66 / 112 / 4     34 /  61 / 3     3
 key, 32 bytes            2-of-3      72 / 122 / 5     40 /  70 / 3     3
 key, 32 bytes            3-of-5      67 / 114 / 4     35 /  62 / 3     3

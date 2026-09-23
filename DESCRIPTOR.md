@@ -24,17 +24,32 @@ text.
 
 ## Canonical form
 
-A generator deletes white space, verifies a checksum that is present, and
-then:
+A generator deletes white space, as SPEC.md Text form defines it, and
+verifies a checksum that is present. It refuses a text that is not a call,
+and one whose parentheses and braces together nest more than 1000 deep. A
+call is a name, `(`, arguments separated by commas and `)`, and after the
+`)` text with no parenthesis, brace or comma, such as the children after a
+`musig()`. An argument is a call, a leaf with no parenthesis, brace or
+comma, or a tap tree: `{`, arguments separated by commas and `}`, with
+nothing before or after it in its argument. The generator does not check
+names, or what an argument means. Then it:
 
-1. writes hardened steps as `h`, and key origin fingerprints and hex keys in
-   lower case, where a hex key is a key expression whose key is 64 or 66 hex
-   digits (a hash such as the argument of `sha256()` keeps its case);
+1. writes hardened steps, a hardened `*` included, as `h`, and key origin
+   fingerprints and hex keys in lower case, changing the case of ASCII
+   letters only, where a hex key is a key expression whose key is 64 or 66
+   hex digits (a hash such as the argument of `sha256()` keeps its case). A
+   key expression is a leaf that holds a character other than a digit,
+   except an argument of `sha256`, `hash256`, `ripemd160`, `hash160`,
+   `addr` or `raw`, whose arguments are hashes, addresses or script bytes.
+   A name counts without its miniscript wrappers, so `v:sha256` is
+   `sha256`, and a leaf in a function the generator does not know is a key
+   expression;
 2. writes the children of every extended key outside a `musig()` as
    `/<0;1>/*` when they are absent, `/0/*` or `/<0;1>/*`;
 3. in a `sortedmulti` or `sortedmulti_a`, sorts the keys in ascending byte
    order of their text without the children (the origin and the key), the
-   full text breaking a tie;
+   full text breaking a tie; an argument after the threshold that is no key
+   expression, such as a `musig()`, counts as its text up to its first `/`;
 4. computes the checksum afresh.
 
 Everything else stays as given. In `multi` and `multi_a` the order of the keys
@@ -68,22 +83,26 @@ bytes and moves past the characters it matched:
    write 0x92 and the four fingerprint bytes. Otherwise write 0x91, the
    fingerprint bytes, the number of steps and the steps.
 2. An extended key: the base58 characters from here to the first character
-   that is not base58, where the character before here is not base58 either,
-   when they decode as base58check to 78 bytes: version (4), depth (1), parent
-   fingerprint (4), child number (4), chain code (32) and key (33). It packs
-   as a key token (below). The rule looks at base58check and the length only:
-   a packer does not check that the key is a point on the curve or that depth
-   and fingerprints make sense, so that every tool packs a text the same
-   way.
+   that is not base58, where here is the start of the text or the character
+   before here is not base58, when they decode as base58check to 78 bytes:
+   version (4), depth (1), parent fingerprint (4), child number (4), chain
+   code (32) and key (33). It packs as a key token (below). The rule looks
+   at base58check and the length only: a packer does not check that the key
+   is a point on the curve or that depth and fingerprints make sense, so
+   that every tool packs a text the same way.
 3. A hex key: the lower-case hex digits from here to the first character that
-   is not one, where the character before here is not one either, when there
-   are 64 or 66 of them. Write 0x94 and 32 bytes, or 0x95 and 33 bytes.
+   is not one, where here is the start of the text or the character before
+   here is not one either, when there are 64 or 66 of them. Write 0x94 and
+   32 bytes, or 0x95 and 33 bytes.
 4. The eight characters `/<0;1>/*`. Write 0x93.
 5. Any other character. Write its byte.
 
 Numbers are unsigned LEB128 in their shortest form: seven bits to a byte, the
-low bits first, the top bit set on every byte but the last. Base58 is the alphabet of Bitcoin
-addresses, and base58check appends the first four bytes of a double SHA-256.
+low bits first, the top bit set on every byte but the last. A number of more
+than five bytes, or of 2^32 or more, does not unpack, and neither does a key
+token that implies a depth above 255, since a depth is one byte. Base58 is
+the alphabet of Bitcoin addresses, and base58check appends the first four
+bytes of a double SHA-256.
 
 A key token:
 
@@ -116,6 +135,16 @@ left as text, a key written with its depth where the origin implies it, or a
 number written with an extra byte would unpack to the same descriptor from
 other bytes, and a set made from those bytes would not be the set every other
 tool cuts from the wallet.
+
+A packed descriptor unpacks to at most eight times its bytes plus 64
+characters, the `#` and checksum not counted. A generator does not cut a set
+of a descriptor whose text is longer than that. A receiver stops, and
+rejects the payload, as soon as its text passes that length. Only the 0x92
+token unpacks to more than eight times its bytes, since it writes a path
+again, and without the bound 0x92 tokens after one long origin would unpack
+to a text quadratic in the payload. The wallets of Sizes unpack to under
+twice their packed length, and a wallet goes over the bound only when many
+of its keys share an origin path of 20 steps or more.
 
 The descriptor checksum is computed on unpacking and so detects nothing; the
 check and the id of the shares cover the payload. Text the rules do not match,
@@ -167,10 +196,20 @@ the descriptor from a share, and learns nothing new by it.
 
 An open set is 32 bytes smaller per plate and keeps nothing private. The first
 k plates hold slices of the packed descriptor, whole extended public keys
-among them, and the others hold mixes of it. A finder of one plate learns
-those keys and that they belong to a multisig wallet. Below k plates nobody
-learns the wallet's addresses, since its script needs every key. A descriptor
-that holds a private key (xprv, tprv or WIF) is never cut as an open set.
+among them, and the others hold mixes of it. A mix gives away a byte of one
+slice wherever the other slices hold text anyone can predict, such as the
+script, the markers and the padding. So a finder of one plate learns whole
+keys, or parts of keys, and that they belong to a multisig wallet. Below k
+plates nobody learns the wallet's addresses, since its script needs every
+key and some key always keeps bytes they do not know.
+
+A descriptor that holds a private key is never cut as an open set. A private
+key is an extended key whose first key byte is 00, whatever its version
+(xprv, tprv, and SLIP-132 forms such as zprv); a WIF key, a base58check
+string of 33 bytes, or 34 ending in 01, that starts with 80 or EF; and a key
+whose text starts with a letter and `prv`, as xprv, tprv and zprv do,
+whether its check passes or not, since a key mistyped in one character would
+still show the rest.
 
 A set cannot be refreshed: splitting again gives the same plates. A departed
 cosigner normally means a new wallet, a new descriptor and so a new set.
@@ -178,8 +217,12 @@ cosigner normally means a new wallet, a new descriptor and so a new set.
 ## Recovery
 
 After recovery (SPEC.md) has verified check and id, the receiver confirms that
-the content type is D and unpacks the payload, which gives the canonical text
-with its checksum. The text goes to wallet software byte for byte.
+the content type is D and unpacks the payload, which gives the descriptor
+with its checksum. The text goes to wallet software byte for byte. A
+conforming generator packs only canonical text, so the receiver checks that
+the text is its own canonical form. A text that is not, or is no descriptor,
+was not cut by a conforming generator from a wallet; the receiver says so
+and hands the text on all the same, since only wallet software can judge it.
 
 ## Sizes
 
