@@ -12,46 +12,8 @@ package shaqr
 // the inputs in the file and compares the text byte for byte, and runs
 // every invalid and text case through Decode, Group, Combine and Audit.
 //
-// The file is one JSON object with three lists. Bytes are in lower-case
-// hex, and a content type is its one character.
-//
-// "valid" lists sets to rebuild. The inputs are name, payload_hex, type,
-// format ("sealed" or "open"), k, n, r_hex (32 bytes for a session set,
-// none for a derived or an open set) and pad_to (the least length of
-// sealed, 0 for none). The outputs are id_hex, tag and shares, the text
-// form of shares 1 to n. The payload of a set of type D is a descriptor
-// packed as DESCRIPTOR.md describes.
-//
-// "invalid" lists text for a receiver to recover from: name, text, and
-// expect. expect.recovered lists what the sets in the text give, each as
-// type and payload_hex, in order of the first share of each set.
-// expect.rejected lists what the receiver reports, sorted, one word per
-// report:
-//
-//	not-decoded    a share whose text does not decode (Text form)
-//	check          a share that fails check (Recovering, step 1)
-//	other-version  a share whose check matches and whose format is
-//	               neither 1, sealed, nor 2, open
-//	malformed      a sealed share shorter than 56 bytes or an open one
-//	               shorter than 24, or a share with x = 0 or k < 2
-//	disputed       an x at which a set holds two or more different shares
-//	too-few        a set with fewer than k undisputed x values
-//	id             a set in which no k shares match the id
-//	padding        a set that passes the id and fails unsealing (step 6)
-//	bad-share      an x at which a share of a recovered set is off the
-//	               set's polynomials, a disputed x included (Finding a
-//	               bad share)
-//
-// The cases with spare shares expect a receiver that searches for k
-// shares that pass the id and then names every held share off the set
-// (Finding a bad share). No case depends on trying disputed shares in
-// turn, which SPEC.md leaves to the receiver.
-//
-// "text" lists input for the text form alone: name, input, and what a
-// receiver reads from it: shares_hex, the decoded shares in order, and
-// rejected, the number of shares whose text does not decode. White space
-// is any character with the Unicode White_Space property, in ASCII or
-// not, and any other character outside base32 ends a share.
+// testdata/README.md describes the file: its fields, and the words of
+// expect.rejected, which reason gives for the errors of this package.
 
 import (
 	"bytes"
@@ -321,6 +283,21 @@ func textVectors(t *testing.T) []textVector {
 	}
 	last := len(t1) - 1
 	unused := t1[:last] + string(b32Alphabet[strings.IndexByte(b32Alphabet, t1[last])|7])
+	// U+001C to U+001F, which Python's str.isspace takes for white space,
+	// each inside a copy of the share.
+	var separators string
+	for c := '\u001c'; c <= '\u001f'; c++ {
+		separators += t1[:6+43] + string(c) + t1[6+43:] + "\n"
+	}
+	// A dotless i, which Unicode upper-cases to I, in place of the first I
+	// of the share.
+	lower := strings.ToLower(t1)
+	i := strings.IndexByte(lower[6:], 'i') + 6
+	dotless := lower[:i] + "\u0131" + lower[i+1:]
+	cutAt, err := b32.DecodeString(t1[6:i])
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	cases := []struct {
 		name     string
@@ -344,6 +321,10 @@ func textVectors(t *testing.T) []textVector {
 		{"an ideographic space inside a share", t1[:6+20] + "\u3000" + t1[6+20:], a[:1], 0},
 		{"every Unicode white space character inside a share", spaced(t1), a[:1], 0},
 		{"a zero-width space is not white space and ends a share", t1[:6+43] + "\u200b" + t1[6+43:], nil, 1},
+		{"U+001C to U+001F are not white space and each ends a share", separators, nil, 4},
+		{"a zero-width no-break space, U+FEFF, is not white space and ends a share", t1[:6+43] + "\ufeff" + t1[6+43:], nil, 1},
+		{"a long s is not an s, so the prefix is not one", "\u017fhaqr:" + t1[6:], nil, 0},
+		{"a dotless i is not the base32 I and ends a share", dotless, [][]byte{cutAt}, 0},
 		{"unused bits set", unused, a[:1], 0},
 		{"text outside shares", "Backup of 23 September:\n\n" + t1 + "\n\n(keep apart from the seed)\n", a[:1], 0},
 		{"the prefix alone", "SHAQR:", [][]byte{{}}, 0},

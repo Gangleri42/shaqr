@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: CC0-1.0
 
 // Runs testdata/vectors.json, which the Go package writes. The format is
-// described in vectors_test.go. Every valid set is rebuilt from its inputs
-// and compared text for text, and every invalid and text case goes through
-// decode, group, combine and audit as a receiver would use them.
+// described in testdata/README.md. Every valid set is rebuilt from its
+// inputs and compared text for text, and every invalid and text case goes
+// through decode, group, combine and audit as a receiver would use them.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
