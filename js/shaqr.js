@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: CC0-1.0
 
-// shaQR, Draft 3 of SPEC.md: k-of-n secret sharing in which a share is
+// shaQR, Draft 4 of SPEC.md: k-of-n secret sharing in which a share is
 // about 1/k the size of the secret. The construction is Krawczyk's
 // "Secret Sharing Made Short". This module follows the API of the Go
 // package, and its functions name the steps of SPEC.md that they carry
@@ -17,17 +17,24 @@ import { apply, basis, interp } from './gf256.js';
 // Content types. Other values are reserved.
 export const TypeBytes = 0x42; // B
 export const TypeText = 0x55; // U, UTF-8 text, not normalized
-export const TypeDescriptor = 0x44; // D, BIP 380 text with its checksum
+export const TypeDescriptor = 0x44; // D, packed descriptor, DESCRIPTOR.md
 
-const version = 0x01;
+// Formats, the first byte of every share.
+const formatSealed = 0x01;
+const formatOpen = 0x02;
+
 const keyLen = 32;
 const idLen = 16;
 const checkLen = 4;
 const hdrLen = 3 + idLen;
 
-// minShare is the length of the shortest share: header, key part, one
-// byte of data and check.
-const minShare = hdrLen + keyLen + 1 + checkLen;
+// keyPart returns the length of the key part of a share of the given
+// format: keyLen in a sealed set, nothing in an open one.
+const keyPart = (format) => (format === formatOpen ? 0 : keyLen);
+
+// minShare returns the length of the shortest share of the given format:
+// header, key part, one byte of data and check.
+const minShare = (format) => hdrLen + keyPart(format) + 1 + checkLen;
 
 // maxSealed is the length of one ChaCha20 stream, which bounds the sealed
 // payload.
@@ -64,8 +71,10 @@ const reasons = {
 //
 //   not-decoded    text after SHAQR: that does not decode (decode)
 //   check          a share that fails its check
-//   other-version  a share whose check matches and whose version is not 1
-//   malformed      a share shorter than 56 bytes, or with x = 0 or k < 2
+//   other-version  a share whose check matches and whose format is neither
+//                  1, sealed, nor 2, open
+//   malformed      a sealed share shorter than 56 bytes or an open one
+//                  shorter than 24, or a share with x = 0 or k < 2
 //   disputed       two or more different shares with the same x (group)
 //   set            shares of more than one set (combine)
 //   too-few        fewer than k undisputed x values
@@ -87,15 +96,21 @@ export class ShaqrError extends Error {
 // it. Share i of the result has x = i + 1, and type is the content type,
 // one byte. The options:
 //
+//   open     makes an open set: no key and no encryption, so that every
+//            share is 32 bytes shorter and shows part of the payload. Use
+//            it only for data that must survive lost shares and need not
+//            stay private. An open set is a function of the content type,
+//            the payload and k. It has no r, so open with derived is an
+//            error, and it ignores r.
 //   derived  makes a derived set: r is empty, and the set is a function of
 //            the content type, the payload and k, so that it can be made
 //            again later. Anyone with one share can then test guesses at
 //            the payload. Use it only for payloads with at least 128 bits
-//            an attacker cannot know.
+//            an attacker cannot know. It ignores r.
 //   minLen   pads the sealed payload to at least this many bytes, to hide
-//            the length of short secrets. A derived set gets no padding
-//            beyond what sealing needs, so derived with minLen above 0 is
-//            an error.
+//            the length of short secrets. A derived or open set gets no
+//            padding beyond what sealing needs, so derived or open with
+//            minLen above 0 is an error.
 //   r        the 32 bytes of r for a session set. Without it split draws
 //            them from crypto.getRandomValues. Pass it only to reproduce a
 //            set, as the test vectors do.
@@ -104,16 +119,22 @@ export class ShaqrError extends Error {
 // recovers the payload from the k shares with the highest x (SPEC.md,
 // Splitting, step 6), so a fault in the computation gives an error and no
 // shares.
-export async function split(payload, type, k, n, { derived = false, minLen = 0, r } = {}) {
+export async function split(payload, type, k, n, { open = false, derived = false, minLen = 0, r } = {}) {
   if (!(payload instanceof Uint8Array)) throw new TypeError('shaqr: the payload must be a Uint8Array');
   if (!isByte(type)) throw new TypeError(`shaqr: the content type ${type} is not one byte`);
   if (!(Number.isInteger(k) && Number.isInteger(n) && k >= 2 && k <= n && n <= 255)) {
     throw new RangeError(`shaqr: invalid threshold ${k} of ${n}`);
   }
   if (!Number.isInteger(minLen) || minLen < 0) throw new RangeError(`shaqr: invalid minLen ${minLen}`);
+  if (open && derived) throw new RangeError('shaqr: an open set has no r and is not derived');
+  if (open && minLen > 0) throw new RangeError('shaqr: an open set takes no padding');
   if (derived && minLen > 0) throw new RangeError('shaqr: a derived set takes no padding');
   const size = sealedLen(payload.length, k, minLen);
   if (size > maxSealed) throw new RangeError(`shaqr: ${size} sealed bytes exceed one ChaCha20 stream`);
+  if (open) {
+    const shares = await build(k, n, new Uint8Array(0), seal(type, payload, size));
+    return selfChecked(shares, type, payload, k);
+  }
 
   // Every secret is declared here and erased in finally, on the way out
   // of a failure too, such as WebCrypto missing from an insecure page.
@@ -127,15 +148,21 @@ export async function split(payload, type, k, n, { derived = false, minLen = 0, 
     // take holds S and the R_i. The keystream under S turns into C in
     // place (see crypt), so it leaves nothing else to erase.
     const shares = await build(k, n, take, crypt(take.subarray(0, keyLen), sealed));
-    try {
-      await verify(shares, type, payload, k);
-    } catch (err) {
-      throw new Error(`shaqr: the new set fails its own check: ${err.message}`, { cause: err });
-    }
-    return shares;
+    return await selfChecked(shares, type, payload, k);
   } finally {
     erase(rand, sealed, msg, seed, take);
   }
+}
+
+// selfChecked runs step 6 of splitting on a new set and returns the set,
+// or throws what verify found.
+async function selfChecked(shares, type, payload, k) {
+  try {
+    await verify(shares, type, payload, k);
+  } catch (err) {
+    throw new Error(`shaqr: the new set fails its own check: ${err.message}`, { cause: err });
+  }
+  return shares;
 }
 
 const isByte = (v) => Number.isInteger(v) && v >= 0 && v <= 255;
@@ -150,30 +177,33 @@ function random(derived, r) {
 }
 
 // build computes the set id and shares 1 to n from take, the key
-// polynomial at 0 .. k-1, and the ciphertext c (SPEC.md, Splitting, steps
-// 4 and 5).
+// polynomial at 0 .. k-1, and C (SPEC.md, Splitting, steps 4 and 5). take
+// is empty only in an open set, whose C is sealed itself and whose shares
+// have no key part.
 async function build(k, n, take, c) {
-  const id = await setID(k, take, c);
+  const format = take.length === 0 ? formatOpen : formatSealed;
+  const id = await setID(format, k, take, c);
+  const kp = keyPart(format);
   const b = c.length / k;
   const keyXs = Array.from({ length: k }, (_, i) => i);
   const dataXs = keyXs.map((i) => i + 1);
-  const keyYs = keyXs.map((i) => take.subarray(keyLen * i, keyLen * (i + 1)));
+  const keyYs = keyXs.map((i) => take.subarray(kp * i, kp * (i + 1)));
   const dataYs = keyXs.map((i) => c.subarray(b * i, b * (i + 1)));
   const shares = [];
   for (let x = 1; x <= n; x++) {
-    const sh = header(k, x, id, keyLen + b);
-    interp(sh.subarray(hdrLen, hdrLen + keyLen), keyXs, keyYs, x);
-    interp(sh.subarray(hdrLen + keyLen, hdrLen + keyLen + b), dataXs, dataYs, x);
+    const sh = header(format, k, x, id, kp + b);
+    if (kp > 0) interp(sh.subarray(hdrLen, hdrLen + kp), keyXs, keyYs, x);
+    interp(sh.subarray(hdrLen + kp, hdrLen + kp + b), dataXs, dataYs, x);
     shares.push(await withCheck(sh));
   }
   return shares;
 }
 
-// header returns a share with version, k, x and id written and room for a
+// header returns a share with format, k, x and id written and room for a
 // body of bodyLen bytes and the check.
-function header(k, x, id, bodyLen) {
+function header(format, k, x, id, bodyLen) {
   const sh = new Uint8Array(hdrLen + bodyLen + checkLen);
-  sh.set([version, k, x]);
+  sh.set([format, k, x]);
   sh.set(id, 3);
   return sh;
 }
@@ -203,7 +233,7 @@ async function verify(shares, type, payload, k) {
   const s = await newSet(read.shares.slice(-k));
   const sol = await solve(s);
   try {
-    const got = open(sol.take, sol.c);
+    const got = unseal(s, sol);
     const same = got.type === type && equal(got.payload, payload);
     erase(got.payload);
     if (!same) throw new Error('the recovered payload differs from the input');
@@ -236,9 +266,10 @@ async function verify(shares, type, payload, k) {
 // first run alone, and throws id with a message that says it stopped.
 // audit names the wrong shares.
 export async function combine(shares) {
-  const sol = await solve(await newSet(shares));
+  const s = await newSet(shares);
+  const sol = await solve(s);
   try {
-    return open(sol.take, sol.c);
+    return unseal(s, sol);
   } finally {
     erase(sol.take);
   }
@@ -280,8 +311,8 @@ export async function audit(shares) {
   }
 }
 
-// group sorts shares into sets by k, id and length, in order of first
-// appearance (SPEC.md, Recovering, steps 1 to 3), and returns
+// group sorts shares into sets by format, k, id and length, in order of
+// first appearance (SPEC.md, Recovering, steps 1 to 3), and returns
 // { sets, rejected }. Shares of different sets are never combined, so a
 // share scanned from the wrong plate lands in a set of its own and spoils
 // nothing.
@@ -305,7 +336,7 @@ export async function group(shares) {
       rejected.push({ index, error });
       continue;
     }
-    const key = `${sh.k} ${hex(sh.id)} ${raw.length}`;
+    const key = `${sh.format} ${sh.k} ${hex(sh.id)} ${raw.length}`;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push({ sh, index });
   }
@@ -325,12 +356,13 @@ export async function group(shares) {
 }
 
 // parseHeader verifies a share as step 1 of recovering does and returns
-// its public part, { k, x, id, tag }. A scanner that calls it on each
-// share as it is read names a damaged share while its holder is still
-// there to try again.
+// its public part, { open, k, x, id, tag }, where open is true for a
+// share of an open set, whose format byte is 2. A scanner that calls it
+// on each share as it is read names a damaged share while its holder is
+// still there to try again.
 export async function parseHeader(share) {
   const sh = await parse(share);
-  return { k: sh.k, x: sh.x, id: new Uint8Array(sh.id), tag: tag(share) };
+  return { open: sh.format === formatOpen, k: sh.k, x: sh.x, id: new Uint8Array(sh.id), tag: tag(share) };
 }
 
 // tag returns the tag of the set a share belongs to: "#" and the first two
@@ -342,15 +374,18 @@ export function tag(share) {
 }
 
 // parse is step 1 of recovering for one decoded share: check first, then
-// the version, then the fields that no share of this version can have.
-// It throws a ShaqrError for a share that fails.
+// the format, then the fields that no share of its format can have. It
+// throws a ShaqrError for a share that fails.
 async function parse(raw) {
   const n = raw.length - checkLen;
   if (n < 0) throw new ShaqrError('check', `${raw.length} bytes cannot hold one`);
   if (!equal(await check(raw.subarray(0, n)), raw.subarray(n))) throw new ShaqrError('check');
-  if (n > 0 && raw[0] !== version) throw new ShaqrError('other-version', `version ${raw[0]}`);
-  if (raw.length < minShare) throw new ShaqrError('malformed', `${raw.length} bytes`);
-  const sh = { k: raw[1], x: raw[2], id: raw.subarray(3, hdrLen), body: raw.subarray(hdrLen, n), raw };
+  if (n > 0 && raw[0] !== formatSealed && raw[0] !== formatOpen) {
+    throw new ShaqrError('other-version', `format ${raw[0]}`);
+  }
+  // A check alone is shorter than a share of either format.
+  if (raw.length < minShare(raw[0])) throw new ShaqrError('malformed', `${raw.length} bytes`);
+  const sh = { format: raw[0], k: raw[1], x: raw[2], id: raw.subarray(3, hdrLen), body: raw.subarray(hdrLen, n), raw };
   if (sh.k < 2) throw new ShaqrError('malformed', `k = ${sh.k}`);
   if (sh.x === 0) throw new ShaqrError('malformed', 'x = 0');
   return sh;
@@ -370,10 +405,10 @@ function disputed(shares) {
 }
 
 // newSet parses shares that should all belong to one set and prepares
-// them for recovery (SPEC.md, Recovering, steps 1 to 3). A set holds k, id
-// and the body length, the shares recovery may use, one for each
-// undisputed x and in order of x, and apart from them every share held at
-// a disputed x.
+// them for recovery (SPEC.md, Recovering, steps 1 to 3). A set holds
+// format, k, id and the body length, the shares recovery may use, one for
+// each undisputed x and in order of x, and apart from them every share
+// held at a disputed x.
 async function newSet(raws) {
   if (raws.length === 0) throw new ShaqrError('too-few');
   const all = [];
@@ -385,8 +420,8 @@ async function newSet(raws) {
       throw err;
     }
   }
-  const [{ k, id, body }] = all;
-  if (all.some((sh) => sh.k !== k || !equal(sh.id, id) || sh.body.length !== body.length)) {
+  const [{ format, k, id, body }] = all;
+  if (all.some((sh) => sh.format !== format || sh.k !== k || !equal(sh.id, id) || sh.body.length !== body.length)) {
     throw new ShaqrError('set');
   }
 
@@ -406,20 +441,19 @@ async function newSet(raws) {
     err.disputed = [...bad].sort((a, b) => a - b);
     throw err;
   }
-  return { k, id, bodyLen: body.length, shares, disputed: shelved };
+  return { format, k, id, bodyLen: body.length, shares, disputed: shelved };
 }
 
-// solve finds k shares whose key polynomial and ciphertext match the set
-// id (SPEC.md, Recovering, steps 4 and 5). It returns take, the key
-// polynomial at 0 .. k-1, the ciphertext c, and the shares that gave
-// them, or throws id. It tries the k-subsets that subsets yields, in
-// order, until their work reaches maxWork; it always tries the first.
-// When the bound stops it early, the id error says so.
+// solve finds k shares whose key polynomial and C match the set id
+// (SPEC.md, Recovering, steps 4 and 5). It returns take, the key
+// polynomial at 0 .. k-1, which is empty in an open set, C as c, and the
+// shares that gave them, or throws id. It tries the k-subsets that
+// subsets yields, in order, until their work reaches maxWork; it always
+// tries the first. When the bound stops it early, the id error says so.
 async function solve(s) {
-  const { k } = s;
-  const dataLen = s.bodyLen - keyLen;
-  const take = new Uint8Array(keyLen * k);
-  const c = new Uint8Array(dataLen * k);
+  const { format, k } = s;
+  const take = new Uint8Array(keyPart(format) * k);
+  const c = new Uint8Array((s.bodyLen - keyPart(format)) * k);
   let tried = 0;
   let work = 0;
   for (const idx of subsets(k, s.shares.length)) {
@@ -429,30 +463,35 @@ async function solve(s) {
     }
     tried++;
     const held = idx.map((i) => s.shares[i]);
-    work += fits(k, held, take, c, dataLen);
-    if (equal(await setID(k, take, c), s.id)) return { take, c, held };
+    work += fits(k, held, take, c);
+    if (equal(await setID(format, k, take, c), s.id)) return { take, c, held };
   }
   erase(take);
   throw new ShaqrError('id');
 }
 
-// fits interpolates take and c from the held shares, for solve to match
-// against the set id, and returns roughly how many field multiplications
-// that took: k*k for the denominators of the basis and 12 for each of
-// its k inverses, up to 14k for the weights at each target, and one per
-// byte for every nonzero weight. A target that is one of the held x
-// values has one nonzero weight and any other has k, so a subset costs up
-// to about k*k*bodyLen. The count is the one the Go package makes.
-function fits(k, held, take, c, dataLen) {
+// fits interpolates take and c, which hold k values each, from the held
+// shares, for solve to match against the set id, and returns roughly how
+// many field multiplications that took: k*k for the denominators of the
+// basis and 12 for each of its k inverses, up to 14k for the weights at
+// each target, and one per byte for every nonzero weight. A target that
+// is one of the held x values has one nonzero weight and any other has k,
+// so a subset costs up to about k*k*bodyLen. The count is the one the Go
+// package makes. An open set has no key part, and its take stays empty.
+function fits(k, held, take, c) {
+  const kp = take.length / k;
+  const dataLen = c.length / k;
   const w = basis(held.map((sh) => sh.x));
-  const keys = held.map((sh) => sh.body.subarray(0, keyLen));
-  const data = held.map((sh) => sh.body.subarray(keyLen));
+  const keys = held.map((sh) => sh.body.subarray(0, kp));
+  const data = held.map((sh) => sh.body.subarray(kp));
   const nonzero = (ws) => ws.filter((v) => v !== 0).length;
   let work = k * (k + 12);
-  for (let i = 0; i < k; i++) {
-    const wi = w(i);
-    apply(take.subarray(keyLen * i, keyLen * (i + 1)), wi, keys);
-    work += 14 * k + nonzero(wi) * keyLen;
+  if (kp > 0) {
+    for (let i = 0; i < k; i++) {
+      const wi = w(i);
+      apply(take.subarray(kp * i, kp * (i + 1)), wi, keys);
+      work += 14 * k + nonzero(wi) * kp;
+    }
   }
   for (let i = 1; i <= k; i++) {
     const wi = w(i);
@@ -495,7 +534,7 @@ function next(idx, m) {
 // at returns the share at x of the polynomials through the shares that
 // solve picked.
 async function at(s, sol, x) {
-  const sh = header(s.k, x, s.id, s.bodyLen);
+  const sh = header(s.format, s.k, x, s.id, s.bodyLen);
   const xs = sol.held.map((h) => h.x);
   const ys = sol.held.map((h) => h.body);
   interp(sh.subarray(hdrLen, hdrLen + s.bodyLen), xs, ys, x);
@@ -519,12 +558,13 @@ function seal(type, payload, size) {
   return s;
 }
 
-// open decrypts c under S, the first 32 bytes of take, then strips
-// trailing zero bytes and one 0x80 and splits off the content type
-// (SPEC.md, Recovering, step 6). The payload it returns is a copy, and it
-// erases the rest.
-function open(take, c) {
-  const sealed = crypt(take.subarray(0, keyLen), c);
+// unseal returns { type, payload } from what solve found in the set s
+// (SPEC.md, Recovering, step 6). It decrypts C under S, the first 32
+// bytes of take, in a sealed set and takes C as sealed in an open one,
+// then strips trailing zero bytes and one 0x80 and splits off the content
+// type. The payload it returns is a copy, and it erases the rest.
+function unseal(s, sol) {
+  const sealed = s.format === formatOpen ? sol.c : crypt(sol.take.subarray(0, keyLen), sol.c);
   try {
     let end = sealed.length;
     while (end > 0 && sealed[end - 1] === 0) end--;
@@ -551,9 +591,10 @@ function crypt(key, data) {
 }
 
 // setID is step 4 of splitting. take is the key polynomial at 0 .. k-1,
-// so the id commits to the whole key polynomial and not only to S.
-async function setID(k, take, c) {
-  return (await sha256(idLabel, [version, k], take, c)).slice(0, idLen);
+// so the id commits to the whole key polynomial and not only to S. In an
+// open set take is empty.
+async function setID(format, k, take, c) {
+  return (await sha256(idLabel, [format, k], take, c)).slice(0, idLen);
 }
 
 async function check(bytes) {

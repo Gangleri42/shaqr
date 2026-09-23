@@ -16,9 +16,11 @@ package shaqr
 // hex, and a content type is its one character.
 //
 // "valid" lists sets to rebuild. The inputs are name, payload_hex, type,
-// k, n, r_hex (32 bytes for a session set, none for a derived set) and
-// pad_to (the least length of sealed, 0 for none). The outputs are
-// id_hex, tag and shares, the text form of shares 1 to n.
+// format ("sealed" or "open"), k, n, r_hex (32 bytes for a session set,
+// none for a derived or an open set) and pad_to (the least length of
+// sealed, 0 for none). The outputs are id_hex, tag and shares, the text
+// form of shares 1 to n. The payload of a set of type D is a descriptor
+// packed as DESCRIPTOR.md describes.
 //
 // "invalid" lists text for a receiver to recover from: name, text, and
 // expect. expect.recovered lists what the sets in the text give, each as
@@ -28,8 +30,10 @@ package shaqr
 //
 //	not-decoded    a share whose text does not decode (Text form)
 //	check          a share that fails check (Recovering, step 1)
-//	other-version  a share whose check matches and whose version is not 1
-//	malformed      a share shorter than 56 bytes, or with x = 0 or k < 2
+//	other-version  a share whose check matches and whose format is
+//	               neither 1, sealed, nor 2, open
+//	malformed      a sealed share shorter than 56 bytes or an open one
+//	               shorter than 24, or a share with x = 0 or k < 2
 //	disputed       an x at which a set holds two or more different shares
 //	too-few        a set with fewer than k undisputed x values
 //	id             a set in which no k shares match the id
@@ -63,6 +67,8 @@ import (
 	"testing"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/Gangleri42/shaqr/descriptor"
 )
 
 var update = flag.Bool("update", false, "rewrite testdata/vectors.json from the inputs in vectors_test.go")
@@ -79,6 +85,7 @@ type validVector struct {
 	Name    string   `json:"name"`
 	Payload string   `json:"payload_hex"`
 	Type    string   `json:"type"`
+	Format  string   `json:"format"`
 	K       int      `json:"k"`
 	N       int      `json:"n"`
 	R       string   `json:"r_hex"`
@@ -111,31 +118,48 @@ type textVector struct {
 	Rejected int      `json:"rejected"`
 }
 
-// descriptor is a 2-of-3 wallet in the canonical form of DESCRIPTOR.md.
-// Its keys are m/48h/0h/0h/2h of the BIP 39 test mnemonics "abandon ..
-// about", "legal winner .. yellow" and "letter advice .. above", with no
-// passphrase.
-const descriptor = "wsh(sortedmulti(2," +
+// wallet is a 2-of-3 descriptor of 457 bytes in the canonical form of
+// DESCRIPTOR.md. Its keys are m/48h/0h/0h/2h of the BIP 39 test mnemonics
+// "abandon .. about", "legal winner .. yellow" and "letter advice ..
+// above", with no passphrase. Packed, it is 252 bytes.
+const wallet = "wsh(sortedmulti(2," +
 	"[28645006/48h/0h/0h/2h]xpub6DnEBNkSJKBYQmsbhS1sP9cNdtU5c9PLFGCjTJmxicxc13WB8zNNGQazabQpyFAGW5bV9tMko4uBxDxjUKL6dSAcx1tEbgEHtgSqyRsekh6/<0;1>/*," +
 	"[73c5da0a/48h/0h/0h/2h]xpub6DkFAXWQ2dHxq2vatrt9qyA3bXYU4ToWQwCHbf5XB2mSTexcHZCeKS1VZYcPoBd5X8yVcbXFHJR9R8UCVpt82VX1VhR28mCyxUFL4r6KFrf/<0;1>/*," +
 	"[b8688df1/48h/0h/0h/2h]xpub6FQya7zGhR92kacYsNnjreouvnHJMpXYsUXnW6NJJAJRCKsa26TzDy4LdnGhEurr3d6y1J8PJ7EEMKQp74XTqYvmGJNogYXSKDszYHtF8mX/<0;1>/*" +
 	"))#8rlnm9ua"
 
-// validInputs are the inputs of the valid vectors.
+// validInputs are the inputs of the valid vectors. The invalid vectors
+// cut up the sets of the first two, and the text vectors that of the
+// first.
 var validInputs = []validVector{
-	{Name: "worked example of SPEC.md", Payload: hexOf("JBSWY3DPEHPK3PXP"), Type: "U", K: 2, N: 3, R: hex.EncodeToString(count(32))},
-	{Name: "empty payload", Payload: "", Type: "B", K: 2, N: 3, R: session("empty payload")},
-	{Name: "password padded to 32", Payload: hexOf("correct horse"), Type: "U", K: 2, N: 3, R: session("password padded to 32"), PadTo: 32},
-	{Name: "password padded to 32, 3-of-5", Payload: hexOf("correct horse"), Type: "U", K: 3, N: 5, R: session("password padded to 32, 3-of-5"), PadTo: 32},
-	{Name: "descriptor of 457 bytes, derived 2-of-3", Payload: hexOf(descriptor), Type: "D", K: 2, N: 3, R: ""},
-	{Name: "key of 32 bytes, 3-of-5", Payload: hex.EncodeToString(bytes.Repeat([]byte{0xa5, 0x5a}, 16)), Type: "B", K: 3, N: 5, R: session("key of 32 bytes, 3-of-5")},
-	{Name: "10-of-20", Payload: hex.EncodeToString(count(100)), Type: "B", K: 10, N: 20, R: session("10-of-20")},
-	{Name: "k = n, 4-of-4", Payload: hexOf("four plates, all of them needed"), Type: "U", K: 4, N: 4, R: session("k = n, 4-of-4")},
-	{Name: "2-of-255, one byte", Payload: "2a", Type: "B", K: 2, N: 255, R: session("2-of-255, one byte")},
+	{Name: "worked example of SPEC.md", Payload: hexOf("JBSWY3DPEHPK3PXP"), Type: "U", Format: "sealed", K: 2, N: 3, R: hex.EncodeToString(count(32))},
+	{Name: "the payload of the worked example, open 2-of-3", Payload: hexOf("JBSWY3DPEHPK3PXP"), Type: "U", Format: "open", K: 2, N: 3},
+	{Name: "empty payload", Payload: "", Type: "B", Format: "sealed", K: 2, N: 3, R: session("empty payload")},
+	{Name: "empty payload, open 2-of-3: the shortest open share, 24 bytes", Payload: "", Type: "B", Format: "open", K: 2, N: 3},
+	{Name: "password padded to 32", Payload: hexOf("correct horse"), Type: "U", Format: "sealed", K: 2, N: 3, R: session("password padded to 32"), PadTo: 32},
+	{Name: "password padded to 32, 3-of-5", Payload: hexOf("correct horse"), Type: "U", Format: "sealed", K: 3, N: 5, R: session("password padded to 32, 3-of-5"), PadTo: 32},
+	{Name: "descriptor of 457 bytes packed to 252, derived 2-of-3", Payload: packed(wallet), Type: "D", Format: "sealed", K: 2, N: 3},
+	{Name: "descriptor of 457 bytes packed to 252, open 2-of-3", Payload: packed(wallet), Type: "D", Format: "open", K: 2, N: 3},
+	{Name: "key of 32 bytes, 3-of-5", Payload: hex.EncodeToString(bytes.Repeat([]byte{0xa5, 0x5a}, 16)), Type: "B", Format: "sealed", K: 3, N: 5, R: session("key of 32 bytes, 3-of-5")},
+	{Name: "text, open 3-of-5", Payload: hexOf("Meet at the old mill at noon, and bring the map."), Type: "U", Format: "open", K: 3, N: 5},
+	{Name: "10-of-20", Payload: hex.EncodeToString(count(100)), Type: "B", Format: "sealed", K: 10, N: 20, R: session("10-of-20")},
+	{Name: "k = n, 4-of-4", Payload: hexOf("four plates, all of them needed"), Type: "U", Format: "sealed", K: 4, N: 4, R: session("k = n, 4-of-4")},
+	{Name: "2-of-255, one byte", Payload: "2a", Type: "B", Format: "sealed", K: 2, N: 255, R: session("2-of-255, one byte")},
+	{Name: "2-of-255, one byte, open", Payload: "2a", Type: "B", Format: "open", K: 2, N: 255},
 }
 
 func hexOf(s string) string {
 	return hex.EncodeToString([]byte(s))
+}
+
+// packed returns the packed payload of a descriptor with its checksum, in
+// hex.
+func packed(desc string) string {
+	p, err := descriptor.Pack(desc)
+	if err != nil {
+		panic(err)
+	}
+	return hex.EncodeToString(p)
 }
 
 // session returns an r for a session set, fixed by the name of the vector.
@@ -154,7 +178,8 @@ func splitVector(v validVector) ([][]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	sp := Splitter{Rand: bytes.NewReader(r), Derived: len(r) == 0, MinLen: v.PadTo}
+	open := v.Format == "open"
+	sp := Splitter{Rand: bytes.NewReader(r), Open: open, Derived: len(r) == 0 && !open, MinLen: v.PadTo}
 	return sp.Split(payload, v.Type[0], v.K, v.N)
 }
 
@@ -206,11 +231,16 @@ func invalidVectors(t *testing.T) []invalidVector {
 	if err != nil {
 		t.Fatal(err)
 	}
+	o, err := splitVector(validInputs[1])
+	if err != nil {
+		t.Fatal(err)
+	}
 	b := mustSplit(t, &Splitter{Rand: bytes.NewReader(make([]byte, 32))}, []byte("another set"), TypeText, 2, 3)
 	f := mustSplit(t, &Splitter{Rand: bytes.NewReader(bytes.Repeat([]byte{0xf0}, 32))}, []byte("framed"), TypeText, 2, 4)
 	f = frame(f, []int{0, 1}, 0, 1)
 	noMarker := craft([]byte("Uno marker\x00\x00"), 2, 2)
 	markerOnly := craft([]byte{0x80, 0}, 2, 2)
+	openNoMarker := build(2, 2, nil, []byte("Uno marker\x00\x00"))
 
 	recA := recovered{"U", hexOf("JBSWY3DPEHPK3PXP")}
 	flipped := bytes.Clone(a[0])
@@ -227,19 +257,29 @@ func invalidVectors(t *testing.T) []invalidVector {
 	}{
 		{"check fails, the other shares go on", lines(flipped, a[1], a[2]), []recovered{recA}, []string{"check"}},
 		{"check fails, too few left", lines(flipped, a[1]), nil, []string{"check", "too-few"}},
-		{"another version with a valid check", lines(with(a[0], 0, 2), a[1], a[2]), []recovered{recA}, []string{"other-version"}},
+		{"format 0x03 with a valid check", lines(with(a[0], 0, 3), a[1], a[2]), []recovered{recA}, []string{"other-version"}},
+		{"format 0x00 with a valid check", lines(with(o[0], 0, 0), o[1], o[2]), []recovered{recA}, []string{"other-version"}},
 		{"x = 0", lines(with(a[0], 2, 0), a[1], a[2]), []recovered{recA}, []string{"malformed"}},
 		{"k = 1", lines(with(a[0], 1, 1), a[1], a[2]), []recovered{recA}, []string{"malformed"}},
-		{"a share of 55 bytes", lines(checked(a[0][:hdrLen+keyLen]), a[1], a[2]), []recovered{recA}, []string{"malformed"}},
+		{"a sealed share of 55 bytes", lines(checked(a[0][:hdrLen+keyLen]), a[1], a[2]), []recovered{recA}, []string{"malformed"}},
+		{"an open share of 23 bytes", lines(checked(o[0][:hdrLen]), o[1], o[2]), []recovered{recA}, []string{"malformed"}},
+		{"a sealed share relabelled open", lines(with(a[0], 0, 2), a[1], a[2]), []recovered{recA}, []string{"too-few"}},
+		{"a sealed set relabelled open", lines(with(a[0], 0, 2), with(a[1], 0, 2)), nil, []string{"id"}},
+		{"an open share relabelled sealed", lines(with(o[0], 0, 1), o[1], o[2]), []recovered{recA}, []string{"malformed"}},
+		{"open and sealed shares of one payload, k of each", lines(a[0], o[1], a[2], o[0]), []recovered{recA, recA}, nil},
+		{"open and sealed shares of one payload, one of each", lines(a[0], o[1]), nil, []string{"too-few", "too-few"}},
 		{"disputed x and no other", lines(a[1], disputed), nil, []string{"disputed", "too-few"}},
 		{"disputed x, recovery goes on", lines(a[0], a[1], disputed, a[2]), []recovered{recA}, []string{"bad-share", "disputed"}},
 		{"forged share, id fails", lines(forge(a[0], hdrLen+keyLen+4), a[1]), nil, []string{"id"}},
 		{"forged share, a spare share recovers", lines(forge(a[0], hdrLen+keyLen+4), a[1], a[2]), []recovered{recA}, []string{"bad-share"}},
 		{"forged key part, a spare share recovers", lines(a[0], forge(a[1], hdrLen+6), a[2]), []recovered{recA}, []string{"bad-share"}},
+		{"open set, forged share, id fails", lines(forge(o[0], hdrLen+4), o[1]), nil, []string{"id"}},
+		{"open set, forged share, a spare share recovers", lines(forge(o[0], hdrLen+4), o[1], o[2]), []recovered{recA}, []string{"bad-share"}},
 		{"two forgers keep S, id fails", lines(f[0], f[1]), nil, []string{"id"}},
 		{"two forgers keep S, spare shares recover", lines(f...), []recovered{{"U", hexOf("framed")}}, []string{"bad-share", "bad-share"}},
 		{"no 0x80", lines(noMarker...), nil, []string{"padding"}},
 		{"nothing before the 0x80", lines(markerOnly...), nil, []string{"padding"}},
+		{"open set, no 0x80", lines(openNoMarker...), nil, []string{"padding"}},
 		{"a share of another set among a complete set", lines(a[0], b[1], a[1], a[2]), []recovered{recA}, []string{"too-few"}},
 		{"a share of another length with the same id", lines(a[0], checked(append(bytes.Clone(a[1][:len(a[1])-checkLen]), 0)), a[2]), []recovered{recA}, []string{"too-few"}},
 		{"two sets", lines(b[2], a[0], b[0], a[2]), []recovered{{"U", hexOf("another set")}, recA}, nil},
@@ -407,8 +447,8 @@ func receive(text string) outcome {
 	disputes := make(map[string]bool)
 	for _, r := range rejected {
 		if errors.Is(r.Err, ErrDisputed) {
-			// Report each x once: k, x and id, and the length.
-			at := fmt.Sprint(raws[r.Index][1:hdrLen], len(raws[r.Index]))
+			// Report each x once: format, k, x and id, and the length.
+			at := fmt.Sprint(raws[r.Index][:hdrLen], len(raws[r.Index]))
 			if disputes[at] {
 				continue
 			}
@@ -495,8 +535,8 @@ func checkValid(t *testing.T, v validVector) {
 		t.Errorf("shares differ from the vector\n got %v\nwant %v", text, v.Shares)
 	}
 	h, _ := ParseHeader(shares[0])
-	if hex.EncodeToString(h.ID[:]) != v.ID || h.Tag() != v.Tag {
-		t.Errorf("id = %x, tag %s, want %s, %s", h.ID, h.Tag(), v.ID, v.Tag)
+	if hex.EncodeToString(h.ID[:]) != v.ID || h.Tag() != v.Tag || h.Open != (v.Format == "open") {
+		t.Errorf("id = %x, tag %s, open %v, want %s, %s, %s", h.ID, h.Tag(), h.Open, v.ID, v.Tag, v.Format)
 	}
 	for _, held := range [][]string{v.Shares[:v.K], v.Shares[v.N-v.K:]} {
 		raws, rejected := Decode(strings.Join(held, "\n"))

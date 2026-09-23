@@ -31,19 +31,20 @@ import (
 const (
 	TypeBytes      byte = 'B'
 	TypeText       byte = 'U' // UTF-8, not normalized
-	TypeDescriptor byte = 'D' // BIP 380 text with its checksum
+	TypeDescriptor byte = 'D' // packed descriptor, DESCRIPTOR.md
+)
+
+// Formats, the first byte of every share.
+const (
+	formatSealed = 0x01
+	formatOpen   = 0x02
 )
 
 const (
-	version  = 0x01
 	keyLen   = 32
 	idLen    = 16
 	checkLen = 4
 	hdrLen   = 3 + idLen
-
-	// minShare is the length of the shortest share: header, key part,
-	// one byte of data and check.
-	minShare = hdrLen + keyLen + 1 + checkLen
 
 	// maxSealed is the length of one ChaCha20 stream, which bounds the
 	// sealed payload.
@@ -72,10 +73,11 @@ var (
 	ErrPadding  = errors.New("shaqr: bad padding")
 )
 
-// A Splitter makes share sets. The zero value makes session sets with r
-// from crypto/rand and no padding.
+// A Splitter makes share sets. The zero value makes sealed session sets
+// with r from crypto/rand and no padding.
 type Splitter struct {
 	// Rand supplies the 32 bytes of r. Nil means crypto/rand.Reader.
+	// Derived and open sets read nothing from it.
 	Rand io.Reader
 
 	// Derived makes a derived set: r is empty, and the set is a function
@@ -86,11 +88,18 @@ type Splitter struct {
 	Derived bool
 
 	// MinLen pads the sealed payload to at least this many bytes, to
-	// hide the length of short secrets. A derived set gets no padding
-	// beyond what sealing needs, so Derived with MinLen above 0 is an
-	// error, and so is a MinLen below 0 or above 2^38, the length of one
-	// ChaCha20 stream.
+	// hide the length of short secrets. A derived or open set gets no
+	// padding beyond what sealing needs, so Derived or Open with MinLen
+	// above 0 is an error, and so is a MinLen below 0 or above 2^38, the
+	// length of one ChaCha20 stream.
 	MinLen int
+
+	// Open makes an open set: no key and no encryption, so that every
+	// share is 32 bytes shorter and shows part of the payload. Use it
+	// only for data that must survive lost shares and need not stay
+	// private. An open set is a function of the content type, the
+	// payload and k. It has no r, so Open with Derived is an error.
+	Open bool
 }
 
 // Split calls Split on a zero Splitter.
@@ -107,11 +116,8 @@ func (s *Splitter) Split(payload []byte, typ byte, k, n int) ([][]byte, error) {
 	if k < 2 || k > n || n > 255 {
 		return nil, fmt.Errorf("shaqr: invalid threshold %d of %d", k, n)
 	}
-	if s.Derived && s.MinLen > 0 {
-		return nil, errors.New("shaqr: a derived set takes no padding")
-	}
-	if s.MinLen < 0 || int64(s.MinLen) > maxSealed {
-		return nil, fmt.Errorf("shaqr: invalid MinLen %d", s.MinLen)
+	if err := s.options(); err != nil {
+		return nil, err
 	}
 	size := sealedLen(len(payload), k, s.MinLen)
 	if size > maxSealed {
@@ -126,21 +132,41 @@ func (s *Splitter) Split(payload []byte, typ byte, k, n int) ([][]byte, error) {
 	}
 
 	sealed := seal(typ, payload, size)
-	seed, take := drawTake(r, k, sealed)
-	// take holds S and the R_i. The keystream under S turns into C in
-	// place (see crypt). What Go cannot erase is listed at erase.
-	defer erase(r, seed, take, sealed)
-
-	shares := build(k, n, take, crypt(take[:keyLen], sealed))
+	var shares [][]byte
+	if s.Open {
+		shares = build(k, n, nil, sealed)
+	} else {
+		seed, take := drawTake(r, k, sealed)
+		// take holds S and the R_i. The keystream under S turns into C
+		// in place (see crypt). What Go cannot erase is listed at erase.
+		defer erase(r, seed, take, sealed)
+		shares = build(k, n, take, crypt(take[:keyLen], sealed))
+	}
 	if err := verify(shares, typ, payload, k); err != nil {
 		return nil, fmt.Errorf("shaqr: the new set fails its own check: %w", err)
 	}
 	return shares, nil
 }
 
-// random returns r: nothing for a derived set, else 32 bytes from s.Rand.
+// options reports fields of s that contradict each other or SPEC.md.
+func (s *Splitter) options() error {
+	switch {
+	case s.Open && s.Derived:
+		return errors.New("shaqr: an open set has no r and is not derived")
+	case s.Open && s.MinLen > 0:
+		return errors.New("shaqr: an open set takes no padding")
+	case s.Derived && s.MinLen > 0:
+		return errors.New("shaqr: a derived set takes no padding")
+	case s.MinLen < 0 || int64(s.MinLen) > maxSealed:
+		return fmt.Errorf("shaqr: invalid MinLen %d", s.MinLen)
+	}
+	return nil
+}
+
+// random returns r: nothing for a derived or open set, else 32 bytes from
+// s.Rand.
 func (s *Splitter) random() ([]byte, error) {
-	if s.Derived {
+	if s.Derived || s.Open {
 		return nil, nil
 	}
 	src := s.Rand
@@ -162,34 +188,56 @@ func drawTake(r []byte, k int, sealed []byte) (seed, take []byte) {
 }
 
 // build computes the set id and shares 1 to n from take, the key
-// polynomial at 0 .. k-1, and the ciphertext c (SPEC.md, Splitting,
-// steps 4 and 5).
+// polynomial at 0 .. k-1, and C (SPEC.md, Splitting, steps 4 and 5).
+// take is empty only in an open set, whose C is sealed itself and whose
+// shares have no key part.
 func build(k, n int, take, c []byte) [][]byte {
-	id := setID(k, take, c)
-	b := len(c) / k
+	format := byte(formatSealed)
+	if len(take) == 0 {
+		format = formatOpen
+	}
+	id := setID(format, k, take, c)
+	kp, b := keyPart(format), len(c)/k
 	keyXs, keyYs := make([]byte, k), make([][]byte, k)
 	dataXs, dataYs := make([]byte, k), make([][]byte, k)
 	for i := range k {
-		keyXs[i], keyYs[i] = byte(i), take[keyLen*i:keyLen*(i+1)]
+		keyXs[i], keyYs[i] = byte(i), take[kp*i:kp*(i+1)]
 		dataXs[i], dataYs[i] = byte(i+1), c[b*i:b*(i+1)]
 	}
 	shares := make([][]byte, n)
 	for i := range shares {
 		x := byte(i + 1)
-		sh := header(byte(k), x, id, keyLen+b)
-		sh = interp(sh, keyXs, keyYs, x)
+		sh := header(format, byte(k), x, id, kp+b)
+		if kp > 0 {
+			sh = interp(sh, keyXs, keyYs, x)
+		}
 		sh = interp(sh, dataXs, dataYs, x)
 		shares[i] = append(sh, check(sh)...)
 	}
 	return shares
 }
 
-// header starts a share with version, k, x and id, and leaves room for
-// a body of bodyLen bytes and the check.
-func header(k, x byte, id []byte, bodyLen int) []byte {
+// header starts a share with format, k, x and id, and leaves room for a
+// body of bodyLen bytes and the check.
+func header(format, k, x byte, id []byte, bodyLen int) []byte {
 	sh := make([]byte, 0, hdrLen+bodyLen+checkLen)
-	sh = append(sh, version, k, x)
+	sh = append(sh, format, k, x)
 	return append(sh, id...)
+}
+
+// keyPart returns the length of the key part of a share of the given
+// format: keyLen in a sealed set, nothing in an open one.
+func keyPart(format byte) int {
+	if format == formatOpen {
+		return 0
+	}
+	return keyLen
+}
+
+// minShare returns the length of the shortest share of the given format:
+// header, key part, one byte of data and check.
+func minShare(format byte) int {
+	return hdrLen + keyPart(format) + 1 + checkLen
 }
 
 // verify is step 6 of splitting. A fault in the code that made the
@@ -220,7 +268,7 @@ func verify(shares [][]byte, typ byte, payload []byte, k int) error {
 	if err != nil {
 		return err
 	}
-	sealed := crypt(sol.take[:keyLen], sol.c)
+	sealed := s.decrypt(sol)
 	defer erase(sol.take, sealed)
 	gotTyp, got, err := unseal(sealed)
 	if err != nil {
@@ -265,7 +313,7 @@ func Combine(shares [][]byte) (typ byte, payload []byte, err error) {
 		return 0, nil, err
 	}
 	defer erase(sol.take)
-	return unseal(crypt(sol.take[:keyLen], sol.c))
+	return unseal(s.decrypt(sol))
 }
 
 // ShareAt returns the share with index x of the set the given shares
@@ -323,10 +371,10 @@ type Rejected struct {
 	Err   error
 }
 
-// Group sorts shares into sets by k, id and length, in order of first
-// appearance (SPEC.md, Recovering, steps 1 to 3). Shares of different
-// sets are never combined, so a share scanned from the wrong plate lands
-// in a set of its own and spoils nothing.
+// Group sorts shares into sets by format, k, id and length, in order of
+// first appearance (SPEC.md, Recovering, steps 1 to 3). Shares of
+// different sets are never combined, so a share scanned from the wrong
+// plate lands in a set of its own and spoils nothing.
 //
 // A share that fails step 1 is rejected and joins no set. Where a set
 // holds two or more different shares with the same x, each of them is
@@ -336,9 +384,9 @@ type Rejected struct {
 // Combine reports.
 func Group(shares [][]byte) (sets [][][]byte, rejected []Rejected) {
 	type key struct {
-		k   byte
-		id  [idLen]byte
-		len int
+		format, k byte
+		id        [idLen]byte
+		len       int
 	}
 	index := make(map[key]int)
 	var groups [][]share
@@ -349,7 +397,7 @@ func Group(shares [][]byte) (sets [][][]byte, rejected []Rejected) {
 			rejected = append(rejected, Rejected{i, err})
 			continue
 		}
-		g := key{sh.k, [idLen]byte(sh.id), len(raw)}
+		g := key{sh.format, sh.k, [idLen]byte(sh.id), len(raw)}
 		j, ok := index[g]
 		if !ok {
 			j = len(groups)
@@ -377,8 +425,10 @@ func Group(shares [][]byte) (sets [][][]byte, rejected []Rejected) {
 	return sets, rejected
 }
 
-// A Header is the public part of a share.
+// A Header is the public part of a share. Open reports a share of an
+// open set, whose format byte is 0x02.
 type Header struct {
+	Open bool
 	K, X int
 	ID   [idLen]byte
 }
@@ -397,19 +447,19 @@ func ParseHeader(raw []byte) (Header, error) {
 	if err != nil {
 		return Header{}, err
 	}
-	return Header{K: int(sh.k), X: int(sh.x), ID: [idLen]byte(sh.id)}, nil
+	return Header{Open: sh.format == formatOpen, K: int(sh.k), X: int(sh.x), ID: [idLen]byte(sh.id)}, nil
 }
 
 // A share is a share that passed step 1 of recovering.
 type share struct {
-	k, x byte
-	id   []byte
-	body []byte // key part, then data part
-	raw  []byte
+	format, k, x byte
+	id           []byte
+	body         []byte // key part, if any, then data part
+	raw          []byte
 }
 
 // parse is step 1 of recovering for one decoded share: check first, then
-// the version, then the fields that no share of this version can have.
+// the format, then the fields that no share of its format can have.
 func parse(raw []byte) (share, error) {
 	n := len(raw) - checkLen
 	if n < 0 {
@@ -418,13 +468,14 @@ func parse(raw []byte) (share, error) {
 	if subtle.ConstantTimeCompare(check(raw[:n]), raw[n:]) != 1 {
 		return share{}, ErrCheck
 	}
-	if n > 0 && raw[0] != version {
-		return share{}, fmt.Errorf("%w: version %d", ErrVersion, raw[0])
+	if n > 0 && raw[0] != formatSealed && raw[0] != formatOpen {
+		return share{}, fmt.Errorf("%w: format %d", ErrVersion, raw[0])
 	}
-	if len(raw) < minShare {
+	// A check alone is shorter than a share of either format.
+	if len(raw) < minShare(raw[0]) {
 		return share{}, fmt.Errorf("%w: %d bytes", ErrShare, len(raw))
 	}
-	sh := share{k: raw[1], x: raw[2], id: raw[3:hdrLen], body: raw[hdrLen:n], raw: raw}
+	sh := share{format: raw[0], k: raw[1], x: raw[2], id: raw[3:hdrLen], body: raw[hdrLen:n], raw: raw}
 	if sh.k < 2 {
 		return share{}, fmt.Errorf("%w: k = %d", ErrShare, sh.k)
 	}
@@ -455,11 +506,11 @@ func disputed(shares []share) map[byte]bool {
 // undisputed x and in order of x, and apart from them every share held
 // at a disputed x.
 type set struct {
-	k        byte
-	id       []byte
-	bodyLen  int
-	shares   []share
-	disputed []share
+	format, k byte
+	id        []byte
+	bodyLen   int
+	shares    []share
+	disputed  []share
 }
 
 // A TooFewError reports a set that holds fewer than k undisputed x
@@ -499,12 +550,12 @@ func newSet(raws [][]byte) (*set, error) {
 		all[i] = sh
 	}
 	for _, sh := range all[1:] {
-		if sh.k != all[0].k || !bytes.Equal(sh.id, all[0].id) || len(sh.raw) != len(all[0].raw) {
+		if sh.format != all[0].format || sh.k != all[0].k || !bytes.Equal(sh.id, all[0].id) || len(sh.raw) != len(all[0].raw) {
 			return nil, ErrSet
 		}
 	}
 
-	s := &set{k: all[0].k, id: all[0].id, bodyLen: len(all[0].body)}
+	s := &set{format: all[0].format, k: all[0].k, id: all[0].id, bodyLen: len(all[0].body)}
 	bad := disputed(all)
 	held := make(map[byte]bool)
 	for _, sh := range all {
@@ -546,29 +597,29 @@ func (s *set) points(idx []int, lo, hi int) (xs []byte, ys [][]byte) {
 // picked by idx.
 func (s *set) at(idx []int, x byte) []byte {
 	xs, ys := s.points(idx, 0, s.bodyLen)
-	sh := header(s.k, x, s.id, s.bodyLen)
+	sh := header(s.format, s.k, x, s.id, s.bodyLen)
 	sh = interp(sh, xs, ys, x)
 	return append(sh, check(sh)...)
 }
 
 // A solution is what k shares of a set give: take, the key polynomial
-// at 0 .. k-1, the ciphertext c, and the positions in set.shares of the
-// shares that gave them.
+// at 0 .. k-1, which is empty in an open set, C, and the positions in
+// set.shares of the shares that gave them.
 type solution struct {
 	take, c []byte
 	idx     []int
 }
 
-// solve finds k shares whose key polynomial and ciphertext match the set
-// id (SPEC.md, Recovering, steps 4 and 5). It tries the k-subsets that
+// solve finds k shares whose key polynomial and C match the set id
+// (SPEC.md, Recovering, steps 4 and 5). It tries the k-subsets that
 // candidates yields, in order, until their work reaches maxWork; it
 // always tries the first. When the bound stops it early, the ErrID it
 // returns says so.
 func (s *set) solve() (*solution, error) {
-	k := int(s.k)
+	k, kp := int(s.k), keyPart(s.format)
 	sol := &solution{
-		take: make([]byte, 0, keyLen*k),
-		c:    make([]byte, 0, (s.bodyLen-keyLen)*k),
+		take: make([]byte, 0, kp*k),
+		c:    make([]byte, 0, (s.bodyLen-kp)*k),
 		idx:  make([]int, k),
 	}
 	tried, work := 0, int64(0)
@@ -628,27 +679,40 @@ func candidates(k, m int) iter.Seq[[]int] {
 // 12 for each of its k inverses, up to 14k for the weights at each
 // target, and one per byte for every nonzero weight. A target that is
 // one of the held x values has one nonzero weight and any other has k,
-// so a subset costs up to about k*k*bodyLen.
+// so a subset costs up to about k*k*bodyLen. An open set has no key
+// part, and its take stays empty.
 func (s *set) fits(sol *solution) (ok bool, work int64) {
-	k := int(s.k)
-	xs, keys := s.points(sol.idx, 0, keyLen)
-	_, data := s.points(sol.idx, keyLen, s.bodyLen)
+	k, kp := int(s.k), keyPart(s.format)
+	xs, keys := s.points(sol.idx, 0, kp)
+	_, data := s.points(sol.idx, kp, s.bodyLen)
 	b := newBasis(xs)
 	// work counts in int64, since k*k*bodyLen can pass 2^31.
 	work = int64(k * (k + 12))
 	sol.take = sol.take[:0]
 	sol.c = sol.c[:0]
-	for i := range k {
-		w := b.weights(byte(i))
-		sol.take = apply(sol.take, w, keys)
-		work += int64(14*k + nonzero(w)*keyLen)
+	if kp > 0 {
+		for i := range k {
+			w := b.weights(byte(i))
+			sol.take = apply(sol.take, w, keys)
+			work += int64(14*k + nonzero(w)*kp)
+		}
 	}
 	for i := 1; i <= k; i++ {
 		w := b.weights(byte(i))
 		sol.c = apply(sol.c, w, data)
-		work += int64(14*k) + int64(nonzero(w))*int64(s.bodyLen-keyLen)
+		work += int64(14*k) + int64(nonzero(w))*int64(s.bodyLen-kp)
 	}
-	return subtle.ConstantTimeCompare(setID(k, sol.take, sol.c), s.id) == 1, work
+	return subtle.ConstantTimeCompare(setID(s.format, k, sol.take, sol.c), s.id) == 1, work
+}
+
+// decrypt returns sealed from what solve found: C decrypted under S in a
+// sealed set, and C as it stands in an open one (SPEC.md, Recovering,
+// step 6).
+func (s *set) decrypt(sol *solution) []byte {
+	if s.format == formatOpen {
+		return sol.c
+	}
+	return crypt(sol.take[:keyLen], sol.c)
 }
 
 // nonzero counts the nonzero weights in w.
@@ -734,11 +798,12 @@ func crypt(key, data []byte) []byte {
 }
 
 // setID is step 4 of splitting. take is the key polynomial at 0 .. k-1,
-// so the id commits to the whole key polynomial and not only to S.
-func setID(k int, take, c []byte) []byte {
+// so the id commits to the whole key polynomial and not only to S. In an
+// open set take is empty.
+func setID(format byte, k int, take, c []byte) []byte {
 	h := sha256.New()
 	h.Write([]byte("shaQR v1 id"))
-	h.Write([]byte{version, byte(k)})
+	h.Write([]byte{format, byte(k)})
 	h.Write(take)
 	h.Write(c)
 	return h.Sum(nil)[:idLen]

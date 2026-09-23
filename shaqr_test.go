@@ -98,7 +98,7 @@ func TestWorkedExample(t *testing.T) {
 		{"S", hex.EncodeToString(take[:keyLen]), "3c4a0309269d72e99a9696f9fd3f92fc69059757c347521c43cde1fb753eedd9"},
 		{"R_1", hex.EncodeToString(take[keyLen:]), "b6cca4e219281751c973c2513fa4895327fff202d2d1eb6ee64efd806ff1771e"},
 		{"C", hex.EncodeToString(c), "54b0b64bba71bfc06b92b4baf857b4cdc01f"},
-		{"id", hex.EncodeToString(setID(2, take, c)), "b96219ec42ff7a50495969396067235c"},
+		{"id", hex.EncodeToString(setID(formatSealed, 2, take, c)), "b96219ec42ff7a50495969396067235c"},
 	} {
 		if v.got != v.want {
 			t.Errorf("%s = %s, want %s", v.name, v.got, v.want)
@@ -142,19 +142,30 @@ func TestStream(t *testing.T) {
 	}
 }
 
+// kinds are the three kinds of set, by name.
+var kinds = map[string]Splitter{
+	"session": {},
+	"derived": {Derived: true},
+	"open":    {Open: true},
+}
+
 func TestRoundTrip(t *testing.T) {
 	tests := []struct{ k, n, size int }{
 		{2, 3, 0}, {2, 3, 1}, {2, 3, 20}, {3, 5, 450}, {5, 9, 33}, {2, 2, 7}, {7, 7, 100}, {4, 10, 3}, {2, 255, 5},
+		{6, 8, 61}, {8, 11, 0}, {9, 9, 17}, {10, 13, 300}, {10, 255, 1000},
 	}
 	for _, tc := range tests {
-		for _, derived := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%d-of-%d/%d/derived=%v", tc.k, tc.n, tc.size, derived), func(t *testing.T) {
+		for name, sp := range kinds {
+			t.Run(fmt.Sprintf("%d-of-%d/%d/%s", tc.k, tc.n, tc.size, name), func(t *testing.T) {
 				payload := random(tc.size)
-				shares, err := (&Splitter{Derived: derived}).Split(payload, TypeBytes, tc.k, tc.n)
+				shares, err := sp.Split(payload, TypeBytes, tc.k, tc.n)
 				if err != nil {
 					t.Fatal(err)
 				}
-				want := minShare - 1 + (tc.size+2+tc.k-1)/tc.k
+				want := minShare(formatSealed) - 1 + (tc.size+2+tc.k-1)/tc.k
+				if sp.Open {
+					want -= keyLen
+				}
 				for _, sh := range shares {
 					if len(sh) != want {
 						t.Fatalf("share of %d bytes, want %d", len(sh), want)
@@ -185,8 +196,10 @@ func TestBadArguments(t *testing.T) {
 			t.Errorf("Split %d of %d: no error", tc.k, tc.n)
 		}
 	}
-	if _, err := (&Splitter{Derived: true, MinLen: 32}).Split([]byte("pw"), TypeText, 2, 3); err == nil {
-		t.Error("derived set with MinLen: no error")
+	for _, sp := range []Splitter{{Derived: true, MinLen: 32}, {Open: true, MinLen: 32}, {Open: true, Derived: true}} {
+		if _, err := sp.Split([]byte("pw"), TypeText, 2, 3); err == nil {
+			t.Errorf("%+v: no error", sp)
+		}
 	}
 	if _, err := (&Splitter{Rand: bytes.NewReader(make([]byte, 31))}).Split(nil, TypeBytes, 2, 3); err == nil {
 		t.Error("31 bytes of randomness: no error")
@@ -198,48 +211,74 @@ func TestBadArguments(t *testing.T) {
 		t.Error("MinLen of one stream rounded up past it: no error")
 	}
 	for _, minLen := range []int{-1, math.MinInt, math.MaxInt} {
-		for _, derived := range []bool{false, true} {
-			if _, err := (&Splitter{Derived: derived, MinLen: minLen}).Split([]byte("pw"), TypeText, 2, 3); err == nil {
-				t.Errorf("MinLen %d, derived %v: no error", minLen, derived)
+		for name, sp := range kinds {
+			sp.MinLen = minLen
+			if _, err := sp.Split([]byte("pw"), TypeText, 2, 3); err == nil {
+				t.Errorf("MinLen %d, %s set: no error", minLen, name)
 			}
 		}
 	}
 }
 
+// failing is a source of randomness that fails.
+type failing struct{}
+
+func (failing) Read([]byte) (int, error) { return 0, errors.New("no randomness") }
+
+// Derived and open sets read nothing from Rand.
+func TestRandUnread(t *testing.T) {
+	for _, sp := range []Splitter{{Derived: true, Rand: failing{}}, {Open: true, Rand: failing{}}} {
+		mustSplit(t, &sp, []byte("no r"), TypeText, 2, 3)
+	}
+	if _, err := (&Splitter{Rand: failing{}}).Split([]byte("r"), TypeText, 2, 3); err == nil {
+		t.Error("session set with failing Rand: no error")
+	}
+}
+
 // Step 6 of splitting catches a share that a fault made wrong, although
-// it carries a valid check and the right id.
+// it carries a valid check and the right id, in a sealed set and in an
+// open one, whose take is empty.
 func TestVerify(t *testing.T) {
 	payload := []byte("step six")
 	const k, n = 3, 5
-	take := random(keyLen * k)
-	c := crypt(take[:keyLen], seal(TypeText, payload, sealedLen(len(payload), k, 0)))
-	good := build(k, n, take, c)
-	if err := verify(good, TypeText, payload, k); err != nil {
-		t.Fatalf("clean set: %v", err)
-	}
-	for i := range n {
-		for _, off := range []int{hdrLen + 5, hdrLen + keyLen + 1} {
-			bad := slices.Clone(good)
-			bad[i] = forge(bad[i], off)
-			if err := verify(bad, TypeText, payload, k); err == nil {
-				t.Errorf("fault at byte %d of share %d: no error", off, i+1)
+	sealed := seal(TypeText, payload, sealedLen(len(payload), k, 0))
+	sealedTake := random(keyLen * k)
+	for _, tc := range []struct {
+		name     string
+		take, c  []byte
+		faultsAt []int
+	}{
+		{"sealed", sealedTake, crypt(sealedTake[:keyLen], sealed), []int{hdrLen + 5, hdrLen + keyLen + 1}},
+		{"open", nil, bytes.Clone(sealed), []int{hdrLen, hdrLen + 2}},
+	} {
+		good := build(k, n, tc.take, tc.c)
+		if err := verify(good, TypeText, payload, k); err != nil {
+			t.Fatalf("clean %s set: %v", tc.name, err)
+		}
+		for i := range n {
+			for _, off := range tc.faultsAt {
+				bad := slices.Clone(good)
+				bad[i] = forge(bad[i], off)
+				if err := verify(bad, TypeText, payload, k); err == nil {
+					t.Errorf("%s set, fault at byte %d of share %d: no error", tc.name, off, i+1)
+				}
 			}
 		}
-	}
 
-	// A fault in C before the id was computed passes the id, and the
-	// comparison with the input catches it.
-	c[4] ^= 1
-	if err := verify(build(k, n, take, c), TypeText, payload, k); err == nil {
-		t.Error("fault in C: no error")
-	}
-	if err := verify(good, TypeBytes, payload, k); err == nil {
-		t.Error("wrong type: no error")
-	}
-	swapped := slices.Clone(good)
-	swapped[0], swapped[1] = swapped[1], swapped[0]
-	if err := verify(swapped, TypeText, payload, k); err == nil {
-		t.Error("shares out of order: no error")
+		// A fault in C before the id was computed passes the id, and the
+		// comparison with the input catches it.
+		tc.c[4] ^= 1
+		if err := verify(build(k, n, tc.take, tc.c), TypeText, payload, k); err == nil {
+			t.Errorf("%s set, fault in C: no error", tc.name)
+		}
+		if err := verify(good, TypeBytes, payload, k); err == nil {
+			t.Errorf("%s set, wrong type: no error", tc.name)
+		}
+		swapped := slices.Clone(good)
+		swapped[0], swapped[1] = swapped[1], swapped[0]
+		if err := verify(swapped, TypeText, payload, k); err == nil {
+			t.Errorf("%s set, shares out of order: no error", tc.name)
+		}
 	}
 }
 
@@ -434,23 +473,124 @@ func TestDerived(t *testing.T) {
 	}
 }
 
+// An open set is a function of the content type, the payload and k, and
+// its first k shares hold the slices of sealed in the clear.
+func TestOpen(t *testing.T) {
+	sp := Splitter{Open: true}
+	payload := []byte("must survive lost plates and need not stay private")
+	a := mustSplit(t, &sp, payload, TypeText, 3, 5)
+	if b := mustSplit(t, &sp, payload, TypeText, 3, 5); !reflect.DeepEqual(a, b) {
+		t.Error("two open sets of one payload differ")
+	}
+	if b := mustSplit(t, &sp, payload, TypeText, 3, 7); !reflect.DeepEqual(a, b[:5]) {
+		t.Error("an open set at larger n does not extend the smaller one")
+	}
+	h, _ := ParseHeader(a[0])
+	for _, tc := range []struct {
+		name  string
+		share []byte
+	}{
+		{"another k", mustSplit(t, &sp, payload, TypeText, 2, 5)[0]},
+		{"another type", mustSplit(t, &sp, payload, TypeBytes, 3, 5)[0]},
+		{"a derived set", mustSplit(t, &Splitter{Derived: true}, payload, TypeText, 3, 5)[0]},
+	} {
+		if other, _ := ParseHeader(tc.share); other.ID == h.ID {
+			t.Errorf("%s has the id of the open set", tc.name)
+		}
+	}
+
+	sealed := seal(TypeText, payload, sealedLen(len(payload), 3, 0))
+	b := len(sealed) / 3
+	for i, sh := range a[:3] {
+		if !bytes.Equal(sh[hdrLen:len(sh)-checkLen], sealed[b*i:b*(i+1)]) {
+			t.Errorf("share %d does not hold slice %d of sealed", i+1, i+1)
+		}
+	}
+}
+
+// Open and sealed shares never form one set: the format is part of the
+// group and of the id.
+func TestOpenApart(t *testing.T) {
+	relabel := func(sh []byte, format byte) []byte {
+		c := bytes.Clone(sh)
+		c[0] = format
+		return reseal(c)
+	}
+	payload := []byte("one payload in two formats")
+	sealed := mustSplit(t, &Splitter{Derived: true}, payload, TypeText, 2, 3)
+	open := mustSplit(t, &Splitter{Open: true}, payload, TypeText, 2, 3)
+	sets, rejected := Group([][]byte{sealed[0], open[1], sealed[2], open[0]})
+	if len(sets) != 2 || len(sets[0]) != 2 || len(sets[1]) != 2 || rejected != nil {
+		t.Errorf("Group = %d sets, %v", len(sets), rejected)
+	}
+	if _, _, err := Combine([][]byte{sealed[0], open[1]}); !errors.Is(err, ErrSet) {
+		t.Errorf("a sealed and an open share: %v, want ErrSet", err)
+	}
+
+	// A sealed share relabelled open, with a check that matches, lands in
+	// a set of its own, and k of them fail the id.
+	flipped := [][]byte{relabel(sealed[0], formatOpen), relabel(sealed[1], formatOpen), relabel(sealed[2], formatOpen)}
+	if sets, _ := Group([][]byte{flipped[0], sealed[1], sealed[2]}); len(sets) != 2 || len(sets[0]) != 1 {
+		t.Errorf("a relabelled share grouped into %d sets", len(sets))
+	}
+	if _, p, err := Combine([][]byte{sealed[1], sealed[2]}); err != nil || !bytes.Equal(p, payload) {
+		t.Errorf("Combine of the sealed shares = %q, %v", p, err)
+	}
+	if _, _, err := Combine(flipped); !errors.Is(err, ErrID) {
+		t.Errorf("sealed shares relabelled open: %v, want ErrID", err)
+	}
+
+	// An open share relabelled sealed is too short to be sealed, or fails
+	// the id.
+	if _, err := ParseHeader(relabel(open[0], formatSealed)); !errors.Is(err, ErrShare) {
+		t.Errorf("a short open share relabelled sealed: %v, want ErrShare", err)
+	}
+	long := mustSplit(t, &Splitter{Open: true}, random(100), TypeBytes, 2, 2)
+	if _, _, err := Combine([][]byte{relabel(long[0], formatSealed), relabel(long[1], formatSealed)}); !errors.Is(err, ErrID) {
+		t.Errorf("open shares relabelled sealed: %v, want ErrID", err)
+	}
+}
+
+// A forged share in an open set is outvoted by spares and named, as in a
+// sealed one.
+func TestOpenDamage(t *testing.T) {
+	payload := random(90)
+	shares := mustSplit(t, &Splitter{Open: true}, payload, TypeBytes, 3, 5)
+	for i := range shares {
+		held := slices.Clone(shares)
+		held[i] = forge(held[i], hdrLen+2)
+		if _, got, err := Combine(held); err != nil || !bytes.Equal(got, payload) {
+			t.Errorf("share %d forged: Combine = %x, %v", i+1, got, err)
+		}
+		if bad, err := Audit(held); err != nil || !reflect.DeepEqual(bad, []int{i + 1}) {
+			t.Errorf("share %d forged: Audit = %v, %v", i+1, bad, err)
+		}
+		k := [][]byte{held[i], held[(i+1)%5], held[(i+2)%5]}
+		if _, _, err := Combine(k); !errors.Is(err, ErrID) {
+			t.Errorf("share %d forged, no spare: %v, want ErrID", i+1, err)
+		}
+	}
+}
+
 func TestShareAt(t *testing.T) {
-	shares := mustSplit(t, new(Splitter), []byte("replace a plate"), TypeText, 3, 5)
-	held := [][]byte{shares[0], shares[2], shares[4]}
-	got, err := ShareAt(held, 2)
-	if err != nil || !bytes.Equal(got, shares[1]) {
-		t.Fatalf("ShareAt 2 = %x, %v", got, err)
-	}
-	ninth, err := ShareAt(held, 9)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, p, err := Combine([][]byte{ninth, shares[1], shares[3]}); err != nil || string(p) != "replace a plate" {
-		t.Errorf("Combine with new share = %q, %v", p, err)
-	}
-	for _, x := range []int{0, 256} {
-		if _, err := ShareAt(held, x); err == nil {
-			t.Errorf("ShareAt %d: no error", x)
+	for name, sp := range kinds {
+		shares := mustSplit(t, &sp, []byte("replace a plate"), TypeText, 3, 5)
+		held := [][]byte{shares[0], shares[2], shares[4]}
+		got, err := ShareAt(held, 2)
+		if err != nil || !bytes.Equal(got, shares[1]) {
+			t.Fatalf("%s set: ShareAt 2 = %x, %v", name, got, err)
+		}
+		ninth, err := ShareAt(held, 9)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, p, err := Combine([][]byte{ninth, shares[1], shares[3]}); err != nil || string(p) != "replace a plate" {
+			t.Errorf("%s set: Combine with new share = %q, %v", name, p, err)
+		}
+		for _, x := range []int{0, 256} {
+			if _, err := ShareAt(held, x); err == nil {
+				t.Errorf("%s set: ShareAt %d: no error", name, x)
+			}
 		}
 	}
 }
@@ -459,7 +599,7 @@ func TestMinLen(t *testing.T) {
 	sp := Splitter{MinLen: 32}
 	a := mustSplit(t, &sp, []byte("pw"), TypeText, 2, 3)
 	b := mustSplit(t, &sp, []byte("a much longer password!"), TypeText, 2, 3)
-	if len(a[0]) != len(b[0]) || len(a[0]) != minShare-1+16 {
+	if len(a[0]) != len(b[0]) || len(a[0]) != minShare(formatSealed)-1+16 {
 		t.Errorf("share lengths %d and %d", len(a[0]), len(b[0]))
 	}
 	if _, p, err := Combine(a[1:]); err != nil || string(p) != "pw" {
@@ -467,7 +607,7 @@ func TestMinLen(t *testing.T) {
 	}
 	// L stays a multiple of k: 32 becomes 33 at k = 3.
 	c := mustSplit(t, &sp, []byte("pw"), TypeText, 3, 3)
-	if len(c[0]) != minShare-1+11 {
+	if len(c[0]) != minShare(formatSealed)-1+11 {
 		t.Errorf("3-of-3 share of %d bytes", len(c[0]))
 	}
 }
@@ -490,8 +630,12 @@ func TestUnseal(t *testing.T) {
 func TestHeader(t *testing.T) {
 	shares := mustSplit(t, new(Splitter), []byte("x"), TypeBytes, 3, 4)
 	h, err := ParseHeader(shares[3])
-	if err != nil || h.K != 3 || h.X != 4 || !bytes.Equal(h.ID[:], shares[0][3:hdrLen]) {
+	if err != nil || h.Open || h.K != 3 || h.X != 4 || !bytes.Equal(h.ID[:], shares[0][3:hdrLen]) {
 		t.Errorf("ParseHeader = %+v, %v", h, err)
+	}
+	open := mustSplit(t, &Splitter{Open: true}, []byte("x"), TypeBytes, 3, 4)
+	if h, err := ParseHeader(open[1]); err != nil || !h.Open || h.K != 3 || h.X != 2 {
+		t.Errorf("ParseHeader of an open share = %+v, %v", h, err)
 	}
 	if want := fmt.Sprintf("#%X", h.ID[:2]); h.Tag() != want {
 		t.Errorf("Tag = %s, want %s", h.Tag(), want)
@@ -511,11 +655,14 @@ func TestHeader(t *testing.T) {
 		{"three bytes", []byte{1, 2, 3}, ErrCheck},
 		{"check alone", check(nil), ErrShare},
 		{"flipped bit", func() []byte { c := bytes.Clone(shares[0]); c[40] ^= 1; return c }(), ErrCheck},
-		{"version 2", set(0, 2), ErrVersion},
-		{"version 0", set(0, 0), ErrVersion},
+		{"format 3", set(0, 3), ErrVersion},
+		{"format 0", set(0, 0), ErrVersion},
 		{"k = 1", set(1, 1), ErrShare},
 		{"x = 0", set(2, 0), ErrShare},
-		{"55 bytes", checked(shares[0][:hdrLen+keyLen]), ErrShare},
+		{"sealed, 55 bytes", checked(shares[0][:hdrLen+keyLen]), ErrShare},
+		{"open, 23 bytes", checked(open[0][:hdrLen]), ErrShare},
+		{"open, 23 bytes, k = 1", checked(append([]byte{formatOpen, 1}, open[0][2:hdrLen]...)), ErrShare},
+		{"a sealed share of 24 bytes", checked(append([]byte{formatSealed}, open[0][1:hdrLen+1]...)), ErrShare},
 		{"short and of another version", checked([]byte{7, 2, 1}), ErrVersion},
 	} {
 		if _, err := ParseHeader(tc.share); !errors.Is(err, tc.want) {
@@ -551,13 +698,22 @@ func TestGroup(t *testing.T) {
 		t.Errorf("stray share alone: %v, want ErrTooFew", err)
 	}
 
-	// Derived sets of one payload and one k are the same set.
-	sp := Splitter{Derived: true}
-	c := mustSplit(t, &sp, []byte("same payload"), TypeText, 2, 3)
-	d := mustSplit(t, &sp, []byte("same payload"), TypeText, 2, 3)
-	e := mustSplit(t, &sp, []byte("same payload"), TypeText, 3, 3)
-	if sets, _ := Group([][]byte{c[0], d[1], e[2]}); len(sets) != 2 || len(sets[0]) != 2 {
-		t.Errorf("derived sets grouped into %d", len(sets))
+	// Derived sets of one payload and one k are the same set, and so are
+	// open sets.
+	for _, sp := range []Splitter{{Derived: true}, {Open: true}} {
+		c := mustSplit(t, &sp, []byte("same payload"), TypeText, 2, 3)
+		d := mustSplit(t, &sp, []byte("same payload"), TypeText, 2, 3)
+		e := mustSplit(t, &sp, []byte("same payload"), TypeText, 3, 3)
+		if sets, _ := Group([][]byte{c[0], d[1], e[2]}); len(sets) != 2 || len(sets[0]) != 2 {
+			t.Errorf("%+v: sets grouped into %d", sp, len(sets))
+		}
+	}
+
+	// An open share below 24 bytes is dropped, and the others go on.
+	open := mustSplit(t, &Splitter{Open: true}, []byte("open"), TypeText, 2, 3)
+	sets, rejected = Group([][]byte{open[0], checked(open[1][:hdrLen]), open[2]})
+	if len(sets) != 1 || len(rejected) != 1 || rejected[0].Index != 1 || !errors.Is(rejected[0].Err, ErrShare) {
+		t.Errorf("Group = %d sets, %v", len(sets), rejected)
 	}
 }
 
@@ -641,23 +797,32 @@ func TestQRAlphanumeric(t *testing.T) {
 	}
 }
 
-// The Sizes table of SPEC.md.
+// The Sizes table of SPEC.md: share bytes and text characters of a
+// sealed and of an open set.
 func TestSizes(t *testing.T) {
-	for _, tc := range []struct{ payload, k, n, share, text int }{
-		{20, 2, 3, 66, 112},
-		{32, 2, 3, 72, 122},
-		{32, 3, 5, 67, 114},
-		{457, 2, 3, 285, 462},
-		{743, 3, 5, 304, 493},
-		{2889, 10, 20, 345, 558},
+	for _, tc := range []struct{ payload, k, n, share, text, openShare, openText int }{
+		{20, 2, 3, 66, 112, 34, 61},
+		{32, 2, 3, 72, 122, 40, 70},
+		{32, 3, 5, 67, 114, 35, 62},
+		{457, 2, 3, 285, 462, 253, 411},
+		{743, 3, 5, 304, 493, 272, 442},
+		{2889, 10, 20, 345, 558, 313, 507},
 	} {
-		shares, err := Split(random(tc.payload), TypeDescriptor, tc.k, tc.n)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(shares[0]) != tc.share || len(Encode(shares[0])) != tc.text {
-			t.Errorf("%d bytes %d-of-%d: share %d bytes, text %d, want %d and %d",
-				tc.payload, tc.k, tc.n, len(shares[0]), len(Encode(shares[0])), tc.share, tc.text)
+		payload := random(tc.payload)
+		sealed := mustSplit(t, new(Splitter), payload, TypeDescriptor, tc.k, tc.n)
+		open := mustSplit(t, &Splitter{Open: true}, payload, TypeDescriptor, tc.k, tc.n)
+		for _, got := range []struct {
+			name        string
+			share       []byte
+			bytes, text int
+		}{
+			{"sealed", sealed[0], tc.share, tc.text},
+			{"open", open[0], tc.openShare, tc.openText},
+		} {
+			if len(got.share) != got.bytes || len(Encode(got.share)) != got.text {
+				t.Errorf("%d bytes %d-of-%d, %s: share %d bytes, text %d, want %d and %d",
+					tc.payload, tc.k, tc.n, got.name, len(got.share), len(Encode(got.share)), got.bytes, got.text)
+			}
 		}
 	}
 }
@@ -688,17 +853,19 @@ func TestSearchBound(t *testing.T) {
 // thousands of tries here.
 func TestLargeQuorumWithForgery(t *testing.T) {
 	payload := random(2880)
-	shares := mustSplit(t, new(Splitter), payload, TypeBytes, 10, 20)
-	for _, pos := range []int{0, 4, 9, 19} {
-		held := slices.Clone(shares)
-		held[pos] = forge(held[pos], hdrLen+keyLen+7)
+	for _, sp := range []Splitter{{}, {Open: true}} {
+		shares := mustSplit(t, &sp, payload, TypeBytes, 10, 20)
+		for _, pos := range []int{0, 4, 9, 19} {
+			held := slices.Clone(shares)
+			held[pos] = forge(held[pos], hdrLen+keyLen+7)
 
-		_, got, err := Combine(held)
-		if err != nil || !bytes.Equal(got, payload) {
-			t.Fatalf("forged share %d: Combine: %v", pos+1, err)
-		}
-		if bad, _ := Audit(held); !reflect.DeepEqual(bad, []int{pos + 1}) {
-			t.Errorf("forged share %d: Audit = %v", pos+1, bad)
+			_, got, err := Combine(held)
+			if err != nil || !bytes.Equal(got, payload) {
+				t.Fatalf("%+v, forged share %d: Combine: %v", sp, pos+1, err)
+			}
+			if bad, _ := Audit(held); !reflect.DeepEqual(bad, []int{pos + 1}) {
+				t.Errorf("%+v, forged share %d: Audit = %v", sp, pos+1, bad)
+			}
 		}
 	}
 }

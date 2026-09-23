@@ -11,14 +11,25 @@ import (
 )
 
 func FuzzSplitCombine(f *testing.F) {
-	f.Add([]byte("JBSWY3DPEHPK3PXP"), byte(2), byte(3), false, 0)
-	f.Add([]byte{}, byte(2), byte(2), true, 0)
-	f.Add([]byte("pw"), byte(3), byte(5), false, 40)
-	f.Fuzz(func(t *testing.T, payload []byte, k, n byte, derived bool, minLen int) {
+	f.Add([]byte("JBSWY3DPEHPK3PXP"), byte(2), byte(3), false, false, 0)
+	f.Add([]byte{}, byte(2), byte(2), true, false, 0)
+	f.Add([]byte("pw"), byte(3), byte(5), false, false, 40)
+	f.Add([]byte{}, byte(2), byte(3), false, true, 0)
+	f.Add([]byte("an open note"), byte(4), byte(9), false, true, 0)
+	f.Fuzz(func(t *testing.T, payload []byte, k, n byte, derived, open bool, minLen int) {
 		sp := Splitter{Derived: derived, MinLen: minLen & 1023}
+		if open {
+			sp = Splitter{Open: true}
+		}
 		shares, err := sp.Split(payload, TypeBytes, int(k), int(n))
 		if err != nil {
 			return
+		}
+		if sp.Derived || sp.Open {
+			again, err := sp.Split(payload, TypeBytes, int(k), int(n))
+			if err != nil || !slices.EqualFunc(again, shares, bytes.Equal) {
+				t.Fatalf("a second split of the same input differs: %v", err)
+			}
 		}
 		// The first k shares, typed back in lower case with labels.
 		var text strings.Builder
@@ -38,7 +49,9 @@ func FuzzSplitCombine(f *testing.F) {
 
 func FuzzDecode(f *testing.F) {
 	shares := mustSplit(f, &Splitter{Derived: true}, []byte("seed corpus"), TypeText, 2, 3)
+	open := mustSplit(f, &Splitter{Open: true}, []byte("seed corpus"), TypeText, 2, 3)
 	f.Add(Encode(shares[0]) + "\n" + Encode(shares[1]))
+	f.Add(Encode(open[2]) + "\n" + Encode(shares[1]) + "\n" + Encode(open[0]))
 	f.Add("#1\n" + strings.ToLower(Encode(shares[2])) + " #1\n" + Encode(shares[0])[:40] + "\n\t" + Encode(shares[0])[40:])
 	f.Add("SHAQR:")
 	f.Add("shaqr:A shaqr:AAA=SHAQR:AA1B")
@@ -62,8 +75,11 @@ func FuzzDecode(f *testing.F) {
 
 func FuzzCombine(f *testing.F) {
 	shares := mustSplit(f, &Splitter{Derived: true}, []byte("seed corpus"), TypeText, 2, 3)
+	open := mustSplit(f, &Splitter{Open: true}, []byte("seed corpus"), TypeText, 2, 3)
 	f.Add(shares[0], shares[1], shares[2])
 	f.Add(shares[0], forge(shares[1], 30), shares[2])
+	f.Add(open[0], open[1], open[2])
+	f.Add(open[0], forge(open[1], hdrLen+1), open[2])
 	f.Fuzz(func(t *testing.T, a, b, c []byte) {
 		// Recompute the checks so that the fuzzer gets past them.
 		var raws [][]byte

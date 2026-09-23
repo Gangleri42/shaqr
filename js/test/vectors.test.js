@@ -15,10 +15,13 @@ const vectors = JSON.parse(readFileSync(new URL('../../testdata/vectors.json', i
 const hex = (bytes) => Buffer.from(bytes).toString('hex');
 const unhex = (s) => new Uint8Array(Buffer.from(s, 'hex'));
 
-// splitVector makes the set a valid vector describes: a session set with
-// the r of the vector, or a derived set when it has none.
+// splitVector makes the set a valid vector describes: an open set, a
+// sealed session set with the r of the vector, or a derived set when a
+// sealed set has none.
 function splitVector(v) {
-  const options = v.r_hex === '' ? { derived: true } : { r: unhex(v.r_hex), minLen: v.pad_to };
+  let options = { r: unhex(v.r_hex), minLen: v.pad_to };
+  if (v.format === 'open') options = { open: true };
+  else if (v.r_hex === '') options = { derived: true };
   return split(unhex(v.payload_hex), v.type.charCodeAt(0), v.k, v.n, options);
 }
 
@@ -26,6 +29,7 @@ for (const v of vectors.valid) {
   test(`valid: ${v.name}`, async () => {
     const shares = await splitVector(v);
     assert.deepEqual(shares.map(encode), v.shares);
+    assert.equal(shares[0][0], v.format === 'open' ? 2 : 1);
     assert.equal(hex(shares[0].subarray(3, 19)), v.id_hex);
     assert.equal(tag(shares[0]), v.tag);
     for (const held of [v.shares.slice(0, v.k), v.shares.slice(v.n - v.k)]) {
@@ -49,9 +53,9 @@ async function receive(text) {
   const disputes = new Set();
   for (const { index, error } of refused) {
     if (error.code === 'disputed') {
-      // Report each x once: k, x and id, and the length.
+      // Report each x once: format, k, x and id, and the length.
       const sh = read.shares[index];
-      const at = `${hex(sh.subarray(1, 19))} ${sh.length}`;
+      const at = `${hex(sh.subarray(0, 19))} ${sh.length}`;
       if (disputes.has(at)) continue;
       disputes.add(at);
     }

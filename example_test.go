@@ -50,6 +50,43 @@ func Example() {
 	// U JBSWY3DPEHPK3PXP
 }
 
+// An open set is for data that must survive lost plates and need not
+// stay private. It has no key, so its shares are 32 bytes shorter than
+// those of a sealed set, and every share shows part of the payload. The
+// same payload, type and k give the same shares every time.
+func ExampleSplitter_Split_open() {
+	note := []byte("Box 1207, Main Street branch; the key is with the lawyer")
+	sp := shaqr.Splitter{Open: true}
+	shares, err := sp.Split(note, shaqr.TypeText, 2, 3)
+	if err != nil {
+		log.Fatal(err)
+	}
+	sealed, err := shaqr.Split(note, shaqr.TypeText, 2, 3)
+	if err != nil {
+		log.Fatal(err)
+	}
+	for _, sh := range shares {
+		h, _ := shaqr.ParseHeader(sh)
+		fmt.Printf("%s %d/3 open=%v\n%s\n", h.Tag(), h.X, h.Open, shaqr.Encode(sh))
+	}
+	fmt.Printf("%d bytes a share, %d in a sealed set\n", len(shares[0]), len(sealed[0]))
+	_, payload, err := shaqr.Combine(shares[1:])
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("%s\n", payload)
+
+	// Output:
+	// #40DB 1/3 open=true
+	// SHAQR:AIBACQG344HEXC24MX4UA2CAZLTIGOKVIJXXQIBRGIYDOLBAJVQWS3RAKN2HEZLFOQQGE4TBNZRWQLZHDPLA
+	// #40DB 2/3 open=true
+	// SHAQR:AIBAEQG344HEXC24MX4UA2CAZLTIGOJ3EB2GQZJANNSXSIDJOMQHO2LUNAQHI2DFEBWGC53ZMVZIAI2OXKQA
+	// #40DB 3/3 open=true
+	// SHAQR:AIBAGQG344HEXC24MX4UA2CAZLTIGOPI656ZDLZPLRLEGJFHSAPX3HNRRDSXNGTF4WQWA5DRSV65QM6P5AWA
+	// 52 bytes a share, 84 in a sealed set
+	// Box 1207, Main Street branch; the key is with the lawyer
+}
+
 // A receiver reads whatever text it is given, sorts the shares into sets
 // and recovers each set it holds k shares of. Nothing it rejects stops
 // the others.
