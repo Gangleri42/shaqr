@@ -18,7 +18,7 @@ needs.
 
 The payload is the descriptor in canonical form, packed, with content type D.
 The canonical form makes one wallet give one text whichever program exported
-it. Packing writes the keys as bytes, which makes the shares about 40 percent
+it. Packing writes the keys as bytes, which makes the shares about a third
 smaller, and it is exact, so every tool gets the same bytes from the same
 text.
 
@@ -27,7 +27,8 @@ text.
 A generator deletes white space, verifies a checksum that is present, and
 then:
 
-1. writes hardened steps as `h` and key origin fingerprints in lower case;
+1. writes hardened steps as `h`, and key origin fingerprints and hex keys
+   (whole runs of 64 or 66 hex digits) in lower case;
 2. writes the children of every extended key outside a `musig()` as
    `/<0;1>/*` when they are absent, `/0/*` or `/<0;1>/*`;
 3. in a `sortedmulti` or `sortedmulti_a`, sorts the keys in ascending byte
@@ -69,15 +70,18 @@ bytes and moves past the characters it matched:
    that is not base58, where the character before here is not base58 either,
    when they decode as base58check to 78 bytes: version (4), depth (1), parent
    fingerprint (4), child number (4), chain code (32) and key (33). It packs
-   as a key token (below).
+   as a key token (below). The rule looks at base58check and the length only:
+   a packer does not check that the key is a point on the curve or that depth
+   and fingerprints make sense, so that every tool packs a text the same
+   way.
 3. A hex key: the lower-case hex digits from here to the first character that
    is not one, where the character before here is not one either, when there
    are 64 or 66 of them. Write 0x94 and 32 bytes, or 0x95 and 33 bytes.
 4. The eight characters `/<0;1>/*`. Write 0x93.
 5. Any other character. Write its byte.
 
-Numbers are unsigned LEB128: seven bits to a byte, the low bits first, the top
-bit set on every byte but the last. Base58 is the alphabet of Bitcoin
+Numbers are unsigned LEB128 in their shortest form: seven bits to a byte, the
+low bits first, the top bit set on every byte but the last. Base58 is the alphabet of Bitcoin
 addresses, and base58check appends the first four bytes of a double SHA-256.
 
 A key token:
@@ -114,8 +118,9 @@ tool cuts from the wallet.
 
 The descriptor checksum is computed on unpacking and so detects nothing; the
 check and the id of the shares cover the payload. Text the rules do not match,
-such as an upper-case hex key or other children, stays as its ASCII bytes and
-costs only its length.
+such as other children, stays as its ASCII bytes and costs only its length.
+Any change to these rules needs a new content type, since the repack check
+makes a receiver refuse bytes packed by other rules.
 
 ## Threshold
 
@@ -163,7 +168,8 @@ An open set is 32 bytes smaller per plate and keeps nothing private. The first
 k plates hold slices of the packed descriptor, whole extended public keys
 among them, and the others hold mixes of it. A finder of one plate learns
 those keys and that they belong to a multisig wallet. Below k plates nobody
-learns the wallet's addresses, since its script needs every key.
+learns the wallet's addresses, since its script needs every key. A descriptor
+that holds a private key (xprv, tprv or WIF) is never cut as an open set.
 
 A set cannot be refreshed: splitting again gives the same plates. A departed
 cosigner normally means a new wallet, a new descriptor and so a new set.

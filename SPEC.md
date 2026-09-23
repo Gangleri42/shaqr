@@ -7,7 +7,7 @@ this draft.
 Changes from Draft 3: an open set leaves the encryption out, for data that must
 survive lost plates and need not stay private; byte 0 is the format, sealed or
 open. Content type D is a packed descriptor, which DESCRIPTOR.md defines and
-which makes descriptor shares about 40 percent smaller.
+which makes descriptor shares about a third smaller.
 
 License: CC0-1.0. The text of this specification, the profile and notes that
 go with it, the code and the test vectors are dedicated to the public domain.
