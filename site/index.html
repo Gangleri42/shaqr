@@ -196,8 +196,8 @@
           </p>
           <p>
             Any k plates rebuild the key and the ciphertext, and with them the secret. Fewer
-            plates show only its length, to within k bytes. Derived sets, below, are the one
-            exception. A share is about 1/k of the secret plus 55 bytes.
+            plates show only its length, to within k bytes. Derived sets and open sets, below,
+            are the exceptions. A share is about 1/k of the secret plus 55 bytes.
           </p>
           <p>
             For a descriptor, k and n are the wallet's own, and share x goes on the plate of
@@ -228,10 +228,11 @@
             and need not stay private.
           </p>
           <p>
-            A finder of one open plate of a descriptor learns some of its xpubs and that they
-            belong to a multisig wallet. Below k plates the wallet's addresses stay hidden, since
-            its script needs every key. This page refuses to cut an open set of anything that
-            holds a private key: an xprv, a tprv or a WIF key.
+            A finder of one open plate of a descriptor learns some of its xpubs, or parts of
+            them, and that they belong to a multisig wallet. Below k plates the wallet's
+            addresses stay hidden, since its script needs every key. This page refuses to cut an
+            open set of anything that holds a private key, an xprv, a tprv, a zprv or a WIF key,
+            or a key that starts like one.
           </p>
 
           <h2>Packed descriptors</h2>
@@ -318,7 +319,7 @@
             <table class="compare">
               <tr><th></th><th>Per plate</th><th>Rebuilt from</th><th>One plate shows</th></tr>
               <tr class="ours"><td>shaQR, encrypted</td><td>1/k of the secret, plus 55 bytes</td><td>any k of n plates</td><td>its length</td></tr>
-              <tr class="ours"><td>shaQR, open</td><td>1/k of the secret, plus 23 bytes</td><td>any k of n plates</td><td>on one of the first k plates, its part in the clear</td></tr>
+              <tr class="ours"><td>shaQR, open</td><td>1/k of the secret, plus 23 bytes</td><td>any k of n plates</td><td>part of it in the clear, on every plate</td></tr>
               <tr><td>SLIP-39 Shamir</td><td>the whole secret</td><td>any k of n plates</td><td>nothing</td></tr>
               <tr><td>BBQr parity</td><td>1/k of the descriptor, plain or compressed</td><td>any k of n plates</td><td>on a data plate, its part in the clear</td></tr>
               <tr><td>UR fountain</td><td>1/k, plus a header per part</td><td>only some sets of k plates</td><td>pieces of the descriptor</td></tr>

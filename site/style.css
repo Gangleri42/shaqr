@@ -125,6 +125,12 @@ main section {
   white-space: nowrap;
 }
 
+/* Keeps what scrollIntoView and focus bring into view clear of the
+   sticky tab bar. */
+html {
+  scroll-padding-top: 4.5rem;
+}
+
 .tabs {
   position: sticky;
   top: 10px;

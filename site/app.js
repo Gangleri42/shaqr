@@ -157,6 +157,11 @@ function switchTab(name) {
     tabButtons[key].setAttribute("aria-selected", String(on));
     panels[key].hidden = !on;
   }
+  // Scrolled past the tab bar, the top of the new panel would sit under
+  // it; scrollIntoView keeps the scroll-padding-top of style.css clear.
+  if (panels[name].getBoundingClientRect().top < $(".tabs").getBoundingClientRect().bottom) {
+    panels[name].scrollIntoView();
+  }
   if (name === "recover") syncRecover();
   else camStop();
 }
@@ -377,20 +382,59 @@ async function base58Check(s) {
   return sameBytes(twice.subarray(0, 4), raw.subarray(body.length)) ? body : null;
 }
 
+// isPrivate reports whether s, a string of base58 characters, is the
+// base58check of a private key: an extended key whose key starts with a
+// 00 byte, whatever its version, as that of an xprv, a tprv or a zprv
+// does, or a WIF key, 0x80 or 0xEF and 32 bytes, with 01 after them when
+// the key is compressed. No such key is longer than 112 characters.
+async function isPrivate(s) {
+  if (s.length > 112) return false;
+  const raw = await base58Check(s);
+  if (!raw) return false;
+  const wif = (raw.length === 33 || (raw.length === 34 && raw[33] === 0x01)) && (raw[0] === 0x80 || raw[0] === 0xef);
+  return wif || (raw.length === 78 && raw[45] === 0x00);
+}
+
+// looksPrivate reports whether the base58 characters of run from i on
+// start as the text of a private extended key does, with a letter and
+// "prv", and are as long as one, whether its check passes or not: a key
+// mistyped in one character would still show the rest.
+const looksPrivate = (run, i) => run.length - i >= 100 && /[A-Za-z]/.test(run[i]) && run.startsWith("prv", i + 1);
+
 // holdsPrivateKey reports whether text holds a private key, which
-// DESCRIPTOR.md never lets into an open set: an extended key whose key
-// starts with a 00 byte, as that of an xprv or tprv does, or a WIF key,
-// 0x80 or 0xEF and 32 bytes, with 01 after them when the key is
-// compressed. descbackup looks at the keys of a descriptor; this looks at
-// every run of base58 in any text, which finds the same keys and more.
-async function holdsPrivateKey(text) {
-  for (const run of text.match(new RegExp(`${base58}{50,112}`, "g")) || []) {
-    const raw = await base58Check(run);
-    if (!raw) continue;
-    const wif = (raw.length === 33 || (raw.length === 34 && raw[33] === 0x01)) && (raw[0] === 0x80 || raw[0] === 0xef);
-    if (wif || (raw.length === 78 && raw[45] === 0x00)) return true;
+// DESCRIPTOR.md never lets into an open set, or a key that looks like one.
+// In a descriptor in canonical form every key is a run of base58 of its
+// own, as descbackup takes it. In any other text a key can be wrapped over
+// lines or run on into other base58 characters, so for text this also
+// looks at the text with its white space deleted, as canonical deletes it,
+// and at every place in a run where a private key can start: a letter and
+// "prv", or the 5, K, L, 9 or c of a WIF key.
+async function holdsPrivateKey(text, isDescriptor) {
+  const texts = isDescriptor ? [text] : [text, text.replace(/\p{White_Space}/gu, "")];
+  for (const t of texts) {
+    for (const run of t.match(new RegExp(`${base58}{50,}`, "g")) || []) {
+      if (looksPrivate(run, 0) || (await isPrivate(run))) return true;
+      if (isDescriptor) continue;
+      for (let i = 1; i + 51 <= run.length; i++) {
+        if (looksPrivate(run, i)) return true;
+        if (!"5KL9c".includes(run[i])) continue;
+        if ((await isPrivate(run.slice(i, i + 51))) || (await isPrivate(run.slice(i, i + 52)))) return true;
+      }
+    }
   }
   return false;
+}
+
+// badKey returns the first extended key of a descriptor in canonical form
+// that fails its base58check, or null. No wallet loads such a key, and an
+// xprv mistyped in one character would pass for public.
+async function badKey(desc) {
+  for (const run of desc.match(new RegExp(`${base58}+`, "g")) || []) {
+    if (!/^[xt](pub|prv)/.test(run)) continue;
+    const raw = await base58Check(run);
+    if (!raw || raw.length !== 78) return run;
+  }
+  return null;
 }
 
 function clearSplit(message, cls = "status") {
@@ -432,7 +476,7 @@ function noteFor(plan, payload, open) {
     return (
       `Descriptor in canonical form, packed from ${plan.text.length} characters to ${payload.length} bytes, ` +
       (open
-        ? "in an open set: the same wallet always gives the same plates, and each plate shows part of the descriptor in the clear. "
+        ? `in an open set: the same wallet always gives the same plates, and each plate shows part of the descriptor, the first ${plan.k} plates in the clear. `
         : "in a derived set: the same wallet always gives the same plates. ") +
       "k and n come from the descriptor, and each plate names its key." +
       (plan.changed
@@ -447,7 +491,7 @@ function noteFor(plan, payload, open) {
         ? "Not every key here looks like an extended key or a hex public key. A derived set needs keys nobody can guess, so this page splits it as text with the k and n above. "
         : "This descriptor has no single multi that holds every key. DESCRIPTOR.md has you give k and n; this page splits it as text with the k and n above. ") +
     (open
-      ? "Text, in an open set: there is no key, so the same text always gives the same plates, and each plate shows part of it in the clear."
+      ? `Text, in an open set: there is no key, so the same text always gives the same plates, and each plate shows part of it, the first ${plan.k} plates in the clear.`
       : "Text, in a session set: the key is random, so the plates are new each time.")
   );
 }
@@ -486,7 +530,18 @@ async function runSplit() {
   let shares;
   let plain = null;
   try {
-    if (open && (await holdsPrivateKey(text))) {
+    const isDescriptor = plan.kind === "descriptor";
+    const bad = isDescriptor ? await badKey(plan.text) : null;
+    if (bad) {
+      if (gen === splitGen) {
+        const msg = `The key ending ${bad.slice(-8)} fails its base58 check: a typing error, or not a key.`;
+        clearSplit(`${msg} Check it against the wallet.`, "status err");
+      }
+      return;
+    }
+    // A descriptor is checked in canonical form, the text that is packed,
+    // whose white space is deleted and whose keys stand apart.
+    if (open && (await holdsPrivateKey(isDescriptor ? plan.text : text, isDescriptor))) {
       if (gen === splitGen) {
         clearSplit("This holds a private key, and an open set would show it on the plates. Turn Encrypt on.", "status warn");
       }
@@ -793,6 +848,8 @@ async function assess() {
         }
       }
       for (const e of s.members) if (e.state === "disputed") e.state = "ok";
+      // The id has settled every disputed x, so each counts as a plate.
+      s.have = new Set(s.members.map((e) => e.head.x)).size;
       if (type === TypeDescriptor) await readDescriptor(s);
     } catch (err) {
       if (!(err instanceof ShaqrError)) throw err;
@@ -1381,8 +1438,12 @@ function downloadPng() {
       }
     }
     const cx = x0 + side / 2;
-    ctx.font = "600 15px system-ui, sans-serif";
-    ctx.fillText(plateLabel({ ...current, x: i + 1 }), cx, y0 + side);
+    // Shrink the label until it fits its cell, whatever the font.
+    const label = plateLabel({ ...current, x: i + 1 });
+    let px = 15;
+    do ctx.font = `600 ${px}px system-ui, sans-serif`;
+    while (ctx.measureText(label).width > side + gap - 8 && --px > 9);
+    ctx.fillText(label, cx, y0 + side);
     if (current.keys) {
       ctx.font = "14px ui-monospace, monospace";
       ctx.fillStyle = "#555";
