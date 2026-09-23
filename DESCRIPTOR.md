@@ -27,8 +27,9 @@ text.
 A generator deletes white space, verifies a checksum that is present, and
 then:
 
-1. writes hardened steps as `h`, and key origin fingerprints and hex keys
-   (whole runs of 64 or 66 hex digits) in lower case;
+1. writes hardened steps as `h`, and key origin fingerprints and hex keys in
+   lower case, where a hex key is a key expression whose key is 64 or 66 hex
+   digits (a hash such as the argument of `sha256()` keeps its case);
 2. writes the children of every extended key outside a `musig()` as
    `/<0;1>/*` when they are absent, `/0/*` or `/<0;1>/*`;
 3. in a `sortedmulti` or `sortedmulti_a`, sorts the keys in ascending byte
