@@ -12,28 +12,30 @@
 // derived set of it, so that every run cuts the same plates from the
 // same wallet. With -open it cuts an open set instead, whose plates are
 // 32 bytes shorter and each show part of the descriptor. It refuses to
-// cut an open set of a descriptor that holds a private key. It takes the
-// descriptor from its argument, or from standard input when there is
-// none or it is "-", which keeps the keys out of the shell's history. It
-// reads k and n from a descriptor whose keys all sit in one multi,
-// sortedmulti, multi_a or sortedmulti_a, and labels share x with the
-// x-th key and with the format of its set, sealed or open. For any other
-// descriptor give -k, the size of the smallest group of keys that can
-// spend, and -n, and assign the plates yourself. It checks the origin
-// and the path of every key, and warns when the descriptor has no
-// checksum, since then nothing shows that it is the wallet's. A 1-of-n
-// descriptor makes no set: split prints the canonical descriptor, which
-// goes on every plate as it is. Every other line it prints that is not a
-// share starts with "#".
+// cut an open set of a descriptor that holds a private key, or a key
+// that looks like one. It takes the descriptor from its argument, or
+// from standard input when there is none or it is "-", which keeps the
+// keys out of the shell's history. It reads k and n from a descriptor
+// whose keys all sit in one multi, sortedmulti, multi_a or
+// sortedmulti_a, and labels share x with the x-th key and with the
+// format of its set, sealed or open. For any other descriptor give -k,
+// the size of the smallest group of keys that can spend, and -n, and
+// assign the plates yourself. It checks the origin and the path of every
+// key and the base58check of every extended key, and warns when the
+// descriptor has no checksum, since then nothing shows that it is the
+// wallet's. A 1-of-n descriptor makes no set: split prints the canonical
+// descriptor, which goes on every plate as it is. Every other line it
+// prints that is not a share starts with "#".
 //
-// Recover and replace read standard input as one text, as it was
-// scanned or typed from the plates: in any case, wrapped over lines,
-// with labels between the shares. They report every share they leave
-// out and why, by the line it starts on, and every set they hold too few
-// shares of, and carry on without them. Recover unpacks the descriptor
-// of every set it holds k shares of and prints it with its checksum,
-// byte for byte. Replace prints share X of the one set it holds k shares
-// of, to cut a lost plate again or add one.
+// Recover and replace read standard input as one text, as it was scanned
+// or typed from the plates: in any case, wrapped over lines, with labels
+// between the shares. They report every share they leave out and why, by
+// the line it starts on, and every set they hold too few shares of, and
+// carry on without them. Recover unpacks the descriptor of every set it
+// holds k shares of and prints it with its checksum, byte for byte, with
+// a warning when it is not a descriptor in canonical form. Replace
+// prints share X of the one set it holds k shares of, to cut a lost
+// plate again or add one.
 package main
 
 import (
@@ -76,8 +78,9 @@ descbackup split [-open] [-k K] [-n N] [DESCRIPTOR]
     "-". Flags go before it.
 
     -open  cut an open set: every plate is 32 bytes shorter and shows
-           part of the descriptor, whole public keys among it. Not for a
-           descriptor that holds a private key.
+           part of the descriptor; the first k plates hold slices of it,
+           whole public keys among them. Not for a descriptor that holds
+           a private key.
     -k K   the number of plates needed to recover: the smallest group of
            keys that can spend. Give it, and -n, when the keys are not
            all in one multi, sortedmulti, multi_a or sortedmulti_a.
@@ -248,16 +251,19 @@ func leaves(desc string) []string {
 
 // checkKeys makes a light check of every key expression in a canonical
 // descriptor, since package descriptor checks none: an origin
-// fingerprint is 8 hex digits, and every step of a path is a number with
-// at most one h after it, or in the children also * or a <a;b>. It
-// refuses H, which BIP 380 does not take as a hardened marker, so that a
-// wallet that wallet software would refuse does not go onto the plates.
-// It does not check the keys themselves.
+// fingerprint is 8 hex digits, every step of a path is a number with at
+// most one h after it, or in the children also * or a <a;b>, and an
+// extended key passes its base58check. It refuses H, which BIP 380 does
+// not take as a hardened marker, so that a wallet that wallet software
+// would refuse does not go onto the plates. An xprv mistyped in one
+// character would otherwise pass for public. It does not check that a
+// key is a point on the curve.
 func checkKeys(desc string) error {
 	for _, leaf := range leaves(desc) {
 		// A name, a number, a hash or a key with neither origin nor
-		// children has no [ and no /.
-		if !strings.ContainsAny(leaf, "[/") {
+		// children has no [ and no /, and needs a check only when it is
+		// an extended key.
+		if !strings.ContainsAny(leaf, "[/") && !extended(leaf) {
 			continue
 		}
 		if err := checkKey(leaf); err != nil {
@@ -272,6 +278,9 @@ func checkKeys(desc string) error {
 
 // checkKey checks the origin and the children of one key expression.
 func checkKey(key string) error {
+	if k, _, _ := strings.Cut(keyOf(key), "/"); extended(k) && len(base58Check(k)) != 78 {
+		return errors.New("the extended key fails its base58check: a typing error, or not a key")
+	}
 	if origin, rest, ok := strings.Cut(key, "]"); ok && strings.HasPrefix(origin, "[") {
 		steps := strings.Split(origin[1:], "/")
 		if fp := steps[0]; len(fp) != 8 || strings.Trim(fp, "0123456789abcdef") != "" {
@@ -301,15 +310,14 @@ func badStep(st string) error {
 
 // private reports whether a canonical descriptor holds a private key,
 // which DESCRIPTOR.md never lets into an open set: an extended key whose
-// key starts with a 00 byte, as that of an xprv or tprv does, or a WIF
-// key, a base58check string of 0x80 or 0xEF and 32 bytes, and 01 after
-// them when the key is compressed.
+// key starts with a 00 byte, as that of an xprv, a tprv or a SLIP-132
+// zprv does, whatever its version; a WIF key, a base58check string of
+// 0x80 or 0xEF and 32 bytes, and 01 after them when the key is
+// compressed; or a key whose text starts with a letter and "prv", as
+// those of xprv, tprv and zprv do, whether its check passes or not.
 func private(desc string) bool {
 	for _, leaf := range leaves(desc) {
-		if i := strings.IndexByte(leaf, ']'); i >= 0 {
-			leaf = leaf[i+1:]
-		}
-		key, _, _ := strings.Cut(leaf, "/")
+		key, _, _ := strings.Cut(keyOf(leaf), "/")
 		raw := base58Check(key)
 		wif := len(raw) == 33 || len(raw) == 34 && raw[33] == 0x01
 		switch {
@@ -317,9 +325,27 @@ func private(desc string) bool {
 			return true
 		case wif && (raw[0] == 0x80 || raw[0] == 0xEF):
 			return true
+		case len(key) >= 4 && ('a' <= key[0] && key[0] <= 'z' || 'A' <= key[0] && key[0] <= 'Z') && key[1:4] == "prv":
+			return true
 		}
 	}
 	return false
+}
+
+// keyOf returns a key expression without its origin.
+func keyOf(key string) string {
+	if strings.HasPrefix(key, "[") {
+		if i := strings.IndexByte(key, ']'); i >= 0 {
+			return key[i+1:]
+		}
+	}
+	return key
+}
+
+// extended reports whether a key starts as the BIP 32 extended keys of
+// BIP 380 do: xpub, xprv, tpub or tprv.
+func extended(key string) bool {
+	return len(key) >= 4 && (key[0] == 'x' || key[0] == 't') && (key[1:4] == "pub" || key[1:4] == "prv")
 }
 
 // base58Alphabet is the alphabet of Bitcoin addresses.
@@ -544,6 +570,10 @@ func recoverSets(in io.Reader, logger *log.Logger) ([]result, error) {
 			logger.Printf("set %s: %s", h.Tag(), failure(set, h.K, r.err))
 		default:
 			p.audit(h.Tag(), set, r.solving, logger)
+			if c, err := descriptor.Canonical(r.desc); err != nil || c != r.desc {
+				logger.Printf("set %s: the text is not a descriptor in canonical form, so no tool that follows DESCRIPTOR.md "+
+					"cut these plates from a wallet; check it against the wallet before you use it", h.Tag())
+			}
 		}
 		results = append(results, r)
 	}

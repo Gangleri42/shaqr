@@ -105,6 +105,10 @@ func wrap(text string) string {
 const (
 	key  = "[d34db33f/48h/0h/0h/2h]xpub6D4BDPcP2GT577Vvch3R8wDkScZWzQzMMUm3PWbmWvVJrZwQY4VUNgqFJPMM3No2dFDFGTsxxpG5uJh7n7epu4trkrX7x7DogT5Uv6fcLW5"
 	bare = "xpub6D4BDPcP2GT577Vvch3R8wDkScZWzQzMMUm3PWbmWvVJrZwQY4VUNgqFJPMM3No2dFDFGTsxxpG5uJh7n7epu4trkrX7x7DogT5Uv6fcLW5"
+	// Another xpub, that of the wallet's key [b8688df1].
+	other = "xpub6FQya7zGhR92kacYsNnjreouvnHJMpXYsUXnW6NJJAJRCKsa26TzDy4LdnGhEurr3d6y1J8PJ7EEMKQp74XTqYvmGJNogYXSKDszYHtF8mX"
+	// bare with its last character changed, so that its check fails.
+	badBare = "xpub6D4BDPcP2GT577Vvch3R8wDkScZWzQzMMUm3PWbmWvVJrZwQY4VUNgqFJPMM3No2dFDFGTsxxpG5uJh7n7epu4trkrX7x7DogT5Uv6fcLW6"
 )
 
 // Split cuts the sets of testdata/vectors.json from the export, sealed
@@ -164,11 +168,18 @@ func TestSplitOpenPrivate(t *testing.T) {
 		wif  = "5HueCGU8rMjxEXxiPuD5BDku4MkFqeZyd4dZ1jvhTVqvbTLvyTJ"
 		// The same key, compressed.
 		wifC = "KwdMAjGmerYanjeui5SHS7JkmpZvVipYvB2LJGU1ZxJwYvP98617"
+		// The same xprv with the SLIP-132 version of a zprv, which is no
+		// xprv or tprv and holds the same private key.
+		zprv = "[aabbccdd/48h/0h/0h/2h]zprvAWgYBBk7JR8GjzqSzmunMCS7dAbwpYTCs1YUMDXqduMA5JFHZ3iX5s2UkAR6vBdcCYYa1S5o1fVLrKsrnpCQ4WpUd6aVUWP1bS2Yy5DoaKv"
+		// The zprv with one character changed, so that its check fails.
+		badZprv = "[aabbccdd/48h/0h/0h/2h]zprvAWgYBBk7JR8GjzqSzmunMCS7dAbwpYTCs1YUMDXqduMA5JFHZ3iX5s2UmAR6vBdcCYYa1S5o1fVLrKsrnpCQ4WpUd6aVUWP1bS2Yy5DoaKv"
 	)
 	for _, args := range [][]string{
 		{"wsh(sortedmulti(2," + xprv + "/<0;1>/*," + bare + "))"},
 		{"-k", "2", "-n", "2", "tr(" + bare + ",multi_a(2," + wif + "," + bare + "/7/*))"},
 		{"-k", "2", "-n", "2", "tr(" + bare + ",pk(musig(" + wifC + "," + bare + ")))"},
+		{"wsh(sortedmulti(2," + zprv + "/<0;1>/*," + bare + "))"},
+		{"wsh(sortedmulti(2," + badZprv + "/<0;1>/*," + bare + "))"},
 	} {
 		if _, _, err := descbackup("", append([]string{"split"}, args...)...); err != nil {
 			t.Errorf("split %.60q: %v", args, err)
@@ -239,7 +250,7 @@ func TestSplitThreshold(t *testing.T) {
 
 	// A descriptor that does not say which key goes with which share
 	// takes k and n from the flags and labels no keys.
-	out, _, err = descbackup("", "split", "-k", "2", "-n", "3", "tr("+key+",sortedmulti_a(2,"+bare+","+bare[:len(bare)-1]+"6))")
+	out, _, err = descbackup("", "split", "-k", "2", "-n", "3", "tr("+key+",sortedmulti_a(2,"+bare+","+other+"))")
 	if err != nil || !strings.Contains(out, " (2-of-3, sealed)\nSHAQR:") || strings.Contains(out, "key") {
 		t.Errorf("split of a tr() = %v\n%s", err, out)
 	}
@@ -264,6 +275,13 @@ func TestSplitKeys(t *testing.T) {
 		{"wsh(sortedmulti(2," + key + "/0/x," + bare + "))", `"x" is not a step`},
 		{"wsh(sortedmulti(2," + key + "/<0;1>," + bare + "//0))", `"" is not a step`},
 		{"wsh(sortedmulti(2,foo[d34db33f]bar," + bare + "))", "a key origin is in [ ] at the start of the key"},
+		// An extended key that fails its check: no wallet loads it, and a
+		// mistyped xprv would pass for public.
+		{"wsh(sortedmulti(2," + key + "," + badBare + "))", "key " + badBare[:48] + "...: the extended key fails its base58check"},
+		{"wsh(sortedmulti(2,[aabbccdd/84h/0h/0h]xprv9s21ZrQH143K3QTDL4LXw2F7HEK3wJUD2nW2nRk4stbPy6cq3jPPqjiChkVvvNKmPGJxWUtg6LnF5kejMRNNU3TGtRBeJgk33yuGBxrMaHi," + bare + "))",
+			"the extended key fails its base58check"},
+		// Inside a musig() a key keeps no children, and is checked all the same.
+		{"tr(" + bare + ",pk(musig(" + bare + "," + badBare + ")))", "the extended key fails its base58check"},
 	} {
 		if _, _, err := descbackup("", "split", c.desc); err == nil || !strings.Contains(err.Error(), c.err) {
 			t.Errorf("split %q: %v, want %q", c.desc, err, c.err)
@@ -453,6 +471,35 @@ func TestRecoverNotADescriptor(t *testing.T) {
 		out, reports, err := descbackup(input, "recover")
 		if err == nil || out != desc+"\n" || reports != "set "+h.Tag()+": "+c.err+"\n" {
 			t.Errorf("%s: recover = %q, %q, %v", c.err, out, reports, err)
+		}
+	}
+}
+
+// A set whose text is not a descriptor in canonical form was not cut by a
+// tool that follows DESCRIPTOR.md. Recover says so and prints the text
+// all the same, since only wallet software can judge it.
+func TestRecoverNotCanonical(t *testing.T) {
+	desc, _, _ := vector(t, "sealed")
+	// The wallet with the children /0/*, which the canonical form writes
+	// as /<0;1>/*.
+	body := strings.ReplaceAll(desc[:len(desc)-9], "/<0;1>/*", "/0/*")
+	sum, _ := descriptor.Checksum(body)
+	note, _ := descriptor.Checksum("hello, this is not a descriptor")
+	for _, text := range []string{body + "#" + sum, "hello, this is not a descriptor#" + note} {
+		payload, err := descriptor.Pack(text)
+		if err != nil {
+			t.Fatal(err)
+		}
+		shares, err := (&shaqr.Splitter{Open: true}).Split(payload, shaqr.TypeDescriptor, 2, 3)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h, _ := shaqr.ParseHeader(shares[0])
+		out, reports, err := descbackup(shaqr.Encode(shares[0])+"\n"+shaqr.Encode(shares[2]), "recover")
+		want := "set " + h.Tag() + ": the text is not a descriptor in canonical form, so no tool that follows DESCRIPTOR.md " +
+			"cut these plates from a wallet; check it against the wallet before you use it\n"
+		if err != nil || out != text+"\n" || reports != want {
+			t.Errorf("recover of %.30q = %q, %q, %v", text, out, reports, err)
 		}
 	}
 }
