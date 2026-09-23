@@ -24,7 +24,7 @@ import {
   TypeText,
   TypeDescriptor,
 } from "./js/shaqr.js";
-import { canonical, quorum, verify } from "./js/descriptor.js";
+import { DescriptorError, canonical, pack, quorum, unpack } from "./js/descriptor.js";
 import { buildCardSvg, fileName as cardFileName, keyLabel } from "./cards.js";
 import { EXAMPLES } from "./examples.js";
 
@@ -39,6 +39,7 @@ const $ = (sel) => document.querySelector(sel);
 const inputEl = $("#desc-input");
 const kEl = $("#k");
 const nEl = $("#n");
+const encryptEl = $("#encrypt");
 const splitStatus = $("#split-status");
 const splitNote = $("#split-note");
 const splitActions = $("#split-actions");
@@ -193,8 +194,8 @@ function drawQR(canvas, text, width) {
   });
 }
 
-function plateLabel({ tag, x, n, k }) {
-  return `${tag} · plate ${x}${n ? ` of ${n}` : ""} · any ${k}`;
+function plateLabel({ tag, x, n, k, open }) {
+  return `${tag} · plate ${x}${n ? ` of ${n}` : ""} · any ${k} · ${open ? "open" : "encrypted"}`;
 }
 
 // plateCard builds one card: the QR code of a share and its labels.
@@ -297,11 +298,12 @@ const realKey = new RegExp(
 
 // planFor decides how to split text (DESCRIPTOR.md): a descriptor that has
 // one multi holding every key, and every key an extended key or a hex
-// public key, is split in canonical form as type D, in a derived set, with
-// k and n from the descriptor. Anything else is text, type U, in a session
-// set with the k and n the user picked. For a descriptor with no such
-// multi this departs from DESCRIPTOR.md, which has the user give k and n
-// and still cuts a derived set.
+// public key, is packed in canonical form as type D, with k and n from the
+// descriptor, for a derived set, or an open set when Encrypt is off.
+// Anything else is text, type U, with the k and n the user picked, for a
+// session set or an open set. For a descriptor with no such multi this
+// departs from DESCRIPTOR.md, which has the user give k and n and still
+// packs it.
 function planFor(text) {
   const bare = text.replace(/\s+/g, "");
   let desc = null;
@@ -334,7 +336,6 @@ function planFor(text) {
     return {
       kind: "descriptor",
       text: desc,
-      payload: utf8.encode(desc),
       type: TypeDescriptor,
       derived: true,
       k: q.k,
@@ -346,7 +347,6 @@ function planFor(text) {
   return {
     kind: "text",
     text,
-    payload: utf8.encode(text),
     type: TypeText,
     derived: false,
     k: wanted.k,
@@ -355,6 +355,42 @@ function planFor(text) {
     looksLikeDescriptor: !!desc && descriptorCall.test(bare),
     oneMulti: !!q,
   };
+}
+
+const base58Alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+// base58Check decodes s, a string of base58 characters, as base58check,
+// whose last four bytes are the first four of a double SHA-256 of the
+// others, and returns the others, or null when the check does not match.
+async function base58Check(s) {
+  let v = 0n;
+  for (const c of s) v = v * 58n + BigInt(base58Alphabet.indexOf(c));
+  const bytes = [];
+  for (; v > 0n; v >>= 8n) bytes.unshift(Number(v & 0xffn));
+  // Every leading 1 stands for a zero byte.
+  const zeros = s.length - s.replace(/^1+/, "").length;
+  const raw = new Uint8Array([...Array(zeros).fill(0), ...bytes]);
+  if (raw.length < 4) return null;
+  const body = raw.subarray(0, raw.length - 4);
+  const once = await crypto.subtle.digest("SHA-256", body);
+  const twice = new Uint8Array(await crypto.subtle.digest("SHA-256", once));
+  return sameBytes(twice.subarray(0, 4), raw.subarray(body.length)) ? body : null;
+}
+
+// holdsPrivateKey reports whether text holds a private key, which
+// DESCRIPTOR.md never lets into an open set: an extended key whose key
+// starts with a 00 byte, as that of an xprv or tprv does, or a WIF key,
+// 0x80 or 0xEF and 32 bytes, with 01 after them when the key is
+// compressed. descbackup looks at the keys of a descriptor; this looks at
+// every run of base58 in any text, which finds the same keys and more.
+async function holdsPrivateKey(text) {
+  for (const run of text.match(new RegExp(`${base58}{50,112}`, "g")) || []) {
+    const raw = await base58Check(run);
+    if (!raw) continue;
+    const wif = (raw.length === 33 || (raw.length === 34 && raw[33] === 0x01)) && (raw[0] === 0x80 || raw[0] === 0xef);
+    if (wif || (raw.length === 78 && raw[45] === 0x00)) return true;
+  }
+  return false;
 }
 
 function clearSplit(message, cls = "status") {
@@ -366,9 +402,60 @@ function clearSplit(message, cls = "status") {
   splitStatus.textContent = message;
 }
 
+// shareSize gives the bytes, text characters and QR version of a share, or
+// of any bytes written as one.
+function shareSize(share) {
+  const text = encode(share);
+  return { bytes: share.length, chars: text.length, version: qrVersion(text) };
+}
+
+const qrName = (version) => (version ? `QR version ${version}` : "too long for one QR code");
+
+// sizeLine is the status line of a split: the size of its shares, and for
+// comparison that of a share of the descriptor as text, cut the same way,
+// when plain is given, and of a full Shamir share of the payload.
+function sizeLine(share, plain, payload) {
+  const s = shareSize(share);
+  const shamir = shareSize(new Uint8Array(payload.length + SHAMIR_EXTRA));
+  const head = `${s.bytes} bytes per share, ${s.chars} characters, ${qrName(s.version)}.`;
+  if (!plain) return `${head} A full Shamir share would be ${shamir.bytes} bytes, ${qrName(shamir.version)}.`;
+  const p = shareSize(plain);
+  return (
+    `${head} Without packing a share would be ${p.bytes} bytes, ${qrName(p.version)}. ` +
+    `A full Shamir share of the packed descriptor would be ${shamir.bytes} bytes, ${qrName(shamir.version)}.`
+  );
+}
+
+// noteFor says what kind of set a split made, and why.
+function noteFor(plan, payload, open) {
+  if (plan.kind === "descriptor") {
+    return (
+      `Descriptor in canonical form, packed from ${plan.text.length} characters to ${payload.length} bytes, ` +
+      (open
+        ? "in an open set: the same wallet always gives the same plates, and each plate shows part of the descriptor in the clear. "
+        : "in a derived set: the same wallet always gives the same plates. ") +
+      "k and n come from the descriptor, and each plate names its key." +
+      (plan.changed
+        ? " Recovery gives back the canonical form, which can differ from your input in key order, hardened marks, children and checksum."
+        : "")
+    );
+  }
+  return (
+    (!plan.looksLikeDescriptor
+      ? ""
+      : plan.oneMulti
+        ? "Not every key here looks like an extended key or a hex public key. A derived set needs keys nobody can guess, so this page splits it as text with the k and n above. "
+        : "This descriptor has no single multi that holds every key. DESCRIPTOR.md has you give k and n; this page splits it as text with the k and n above. ") +
+    (open
+      ? "Text, in an open set: there is no key, so the same text always gives the same plates, and each plate shows part of it in the clear."
+      : "Text, in a session set: the key is random, so the plates are new each time.")
+  );
+}
+
 async function runSplit() {
   const gen = ++splitGen;
   const text = inputEl.value.trim();
+  const open = !encryptEl.checked;
   lastText = text;
 
   if (!text) {
@@ -395,9 +482,22 @@ async function runSplit() {
   }
   setQuorumControls(plan.k, plan.n, plan.kind === "descriptor");
 
+  let payload;
   let shares;
+  let plain = null;
   try {
-    shares = await split(plan.payload, plan.type, plan.k, plan.n, { derived: plan.derived });
+    if (open && (await holdsPrivateKey(text))) {
+      if (gen === splitGen) {
+        clearSplit("This holds a private key, and an open set would show it on the plates. Turn Encrypt on.", "status warn");
+      }
+      return;
+    }
+    const options = open ? { open } : { derived: plan.derived };
+    payload = plan.kind === "descriptor" ? await pack(plan.text) : utf8.encode(plan.text);
+    shares = await split(payload, plan.type, plan.k, plan.n, options);
+    if (plan.kind === "descriptor") {
+      [plain] = await split(utf8.encode(plan.text), TypeText, plan.k, plan.n, options);
+    }
   } catch (err) {
     if (gen === splitGen) clearSplit(err.message, "status err");
     return;
@@ -409,37 +509,11 @@ async function runSplit() {
   if (gen !== splitGen) return;
 
   const version = qrVersion(texts[0]);
-  const shamirBytes = plan.payload.length + SHAMIR_EXTRA;
-  const shamirChars = 6 + Math.ceil((8 * shamirBytes) / 5);
-  const shamirVersion = qrVersion("SHAQR:" + "A".repeat(shamirChars - 6));
+  current = { ...plan, payload, open, shares, texts, tag: head.tag, id: hex(head.id), version };
 
-  current = { ...plan, shares, texts, tag: head.tag, id: hex(head.id), version };
-
-  const shamir = shamirVersion
-    ? `QR version ${shamirVersion}`
-    : "too long for one QR code";
   splitStatus.className = "status";
-  splitStatus.textContent =
-    `${shares[0].length} bytes per share, ${texts[0].length} characters, ` +
-    (version ? `QR version ${version}. ` : "too long for one QR code. ") +
-    `A full Shamir share would be ${shamirBytes} bytes, ${shamir}.`;
-
-  if (plan.kind === "descriptor") {
-    splitNote.textContent =
-      "Descriptor, canonical form, derived set: the same wallet always gives the same plates. " +
-      "k and n come from the descriptor, and each plate names its key." +
-      (plan.changed
-        ? " Recovery gives back the canonical form, which can differ from your input in key order, hardened marks, children and checksum."
-        : "");
-  } else {
-    splitNote.textContent =
-      (!plan.looksLikeDescriptor
-        ? ""
-        : plan.oneMulti
-          ? "Not every key here looks like an extended key or a hex public key. A derived set needs keys nobody can guess, so this page splits it as text with the k and n above. "
-          : "This descriptor has no single multi that holds every key. DESCRIPTOR.md has you give k and n; this page splits it as text with the k and n above. ") +
-      "Text, session set: the key is random, so the plates are new each time.";
-  }
+  splitStatus.textContent = sizeLine(shares[0], plain, payload);
+  splitNote.textContent = noteFor(plan, payload, open);
   splitNote.hidden = false;
 
   partsGrid.innerHTML = "";
@@ -460,12 +534,13 @@ async function runSplit() {
       x: i + 1,
       n: current.n,
       k: current.k,
+      open,
       key: current.keys ? current.keys[i] : "",
     };
     const { card } = plateCard({
       text: t,
       num: String(i + 1).padStart(2, "0"),
-      pill: current.tag,
+      pill: open ? `${current.tag} open` : current.tag,
       pillClass: "set",
       sub: "",
       key: plate.key,
@@ -620,7 +695,7 @@ function paintEntry(e) {
   }
 
   const plate = e.source === "split" ? `plate ${rec.entries.indexOf(e) + 1}${e.n ? ` of ${e.n}` : ""}` : "";
-  subEl.textContent = e.head ? plateLabel({ tag: e.head.tag, x: e.head.x, n: e.n, k: e.head.k }) : plate;
+  subEl.textContent = e.head ? plateLabel({ ...e.head, n: e.n }) : plate;
   subEl.hidden = !subEl.textContent;
   whyEl.textContent = reasons[state] || "";
   whyEl.hidden = !whyEl.textContent;
@@ -641,6 +716,21 @@ async function readHeads() {
       e.intrinsic = { check: "damaged", "other-version": "version", malformed: "malformed" }[err.code] || "damaged";
     }
   }
+}
+
+// readDescriptor unpacks the payload of a recovered type D set into
+// s.text, or records in s.unpackError why it does not unpack, and names
+// the key of each plate from the quorum of the text.
+async function readDescriptor(s) {
+  try {
+    s.text = await unpack(s.result.payload);
+  } catch (err) {
+    if (!(err instanceof DescriptorError)) throw err;
+    s.unpackError = err.code;
+    return;
+  }
+  const q = quorum(s.text);
+  if (q) for (const e of s.members) if (!e.key && q.keys[e.head.x - 1]) e.key = keyLabel(q.keys[e.head.x - 1]);
 }
 
 // assess works out the state of every selected share and recovers every set
@@ -664,10 +754,13 @@ async function assess() {
       k: first.head.k,
       tag: first.head.tag,
       id: hex(first.head.id),
+      open: first.head.open,
       have: xs.size,
       disputed: disputedXs.size,
       disputedXs,
       result: null,
+      text: null,
+      unpackError: null,
       error: null,
       wrong: [],
     };
@@ -700,10 +793,7 @@ async function assess() {
         }
       }
       for (const e of s.members) if (e.state === "disputed") e.state = "ok";
-      if (type === TypeDescriptor) {
-        const q = quorum(new TextDecoder().decode(payload));
-        if (q) for (const e of s.members) if (!e.key && q.keys[e.head.x - 1]) e.key = keyLabel(q.keys[e.head.x - 1]);
-      }
+      if (type === TypeDescriptor) await readDescriptor(s);
     } catch (err) {
       if (!(err instanceof ShaqrError)) throw err;
       s.error = err;
@@ -773,7 +863,7 @@ function renderRecStatus({ selected, infos, primary, others, damaged, version, m
   for (const s of others) {
     const count = plural(s.members.length, "plate", "plates");
     if (s.result) extra.push(`Set ${s.tag} recovered too, from ${plural(s.have, "plate", "plates")}.`);
-    else if (primary && s.tag === primary.tag) extra.push(`${count} tagged ${s.tag} with another length or threshold, left out.`);
+    else if (primary && s.tag === primary.tag) extra.push(`${count} tagged ${s.tag} with another format, length or threshold, left out.`);
     else extra.push(`${count} of another set, ${s.tag}, left out.`);
   }
   const tail = extra.join(" ");
@@ -826,13 +916,37 @@ function renderRecStatus({ selected, infos, primary, others, damaged, version, m
 
 const typeNames = { [TypeDescriptor]: "descriptor", [TypeText]: "text", [TypeBytes]: "bytes" };
 
+// resultNote describes a recovered set, and for a descriptor whether it
+// unpacked and is in canonical form. It never quotes the payload.
+function resultNote(s) {
+  const { type, payload } = s.result;
+  const kind = typeNames[type] || `content type 0x${type.toString(16).padStart(2, "0")}`;
+  const head = `Set ${s.tag}, ${s.open ? "open" : "encrypted"}, ${kind}`;
+  if (type !== TypeDescriptor) return { text: `${head}, ${payload.length} bytes.`, cls: "" };
+  if (s.unpackError === "not-packed") {
+    return { text: `${head}: its ${payload.length} bytes are not the packed form of a descriptor.`, cls: "bad" };
+  }
+  if (s.unpackError) return { text: `${head}: its ${payload.length} bytes do not unpack.`, cls: "bad" };
+  const unpacked = `${head} packed in ${payload.length} bytes, unpacked to ${s.text.length} characters.`;
+  if (isCanonical(s.text)) return { text: unpacked, cls: "" };
+  return { text: `${unpacked} It is not in canonical form.`, cls: "warn" };
+}
+
+// isCanonical reports whether text is a descriptor in canonical form.
+function isCanonical(text) {
+  try {
+    return canonical(text) === text;
+  } catch {
+    return false;
+  }
+}
+
 function renderResults({ infos, primary }) {
   recResults.innerHTML = "";
   const done = infos.filter((s) => s.result).sort((a, b) => (a === primary ? -1 : b === primary ? 1 : 0));
   for (const s of done) {
     const { type, payload } = s.result;
-    const isText = type === TypeDescriptor || type === TypeText;
-    const body = isText ? new TextDecoder().decode(payload) : hex(payload);
+    const body = s.text || (type === TypeText ? new TextDecoder().decode(payload) : hex(payload));
 
     const card = document.createElement("div");
     card.className = "card result";
@@ -841,26 +955,16 @@ function renderResults({ infos, primary }) {
     const same = current && current.id === s.id && current.type === type && sameBytes(current.payload, payload);
     match.textContent = same ? "✓ matches the original" : `✓ recovered set ${s.tag}`;
 
+    const { text, cls } = resultNote(s);
     const note = document.createElement("p");
-    note.className = "note result-note";
-    const kind = typeNames[type] || `content type 0x${type.toString(16).padStart(2, "0")}`;
-    let check = "";
-    if (type === TypeDescriptor) {
-      try {
-        verify(body);
-        check = `, checksum ${body.slice(body.lastIndexOf("#"))} verifies`;
-      } catch (err) {
-        check = `, ${err.message.replace(/^descriptor: /, "")}`;
-        note.classList.add("bad");
-      }
-    }
-    note.textContent = `Set ${s.tag}, ${kind}, ${payload.length} bytes${check}.`;
+    note.className = `note result-note ${cls}`;
+    note.textContent = text;
 
     const pre = document.createElement("pre");
     pre.textContent = body;
     const copy = document.createElement("button");
     copy.className = "btn";
-    copy.textContent = type === TypeDescriptor ? "Copy descriptor" : isText ? "Copy text" : "Copy hex";
+    copy.textContent = s.text ? "Copy descriptor" : type === TypeText ? "Copy text" : "Copy hex";
     copy.addEventListener("click", () => copyText(body));
     card.append(match, note, pre, copy);
     recResults.append(card);
@@ -907,13 +1011,14 @@ async function tryBadPlate(kind) {
     const swap = text[at] === "Q" ? "R" : "Q";
     block = `# plate 1 of set ${current.tag}, typed by hand with one letter wrong\n${handTyped(text.slice(0, at) + swap + text.slice(at + 1))}`;
   } else if (kind === "other") {
-    const other = await split(randomBytes(current.payload.length), TypeBytes, current.k, current.n);
+    const other = await split(randomBytes(current.payload.length), TypeBytes, current.k, current.n, { open: current.open });
     block = `# a plate of another wallet\n${encode(other[0])}`;
   } else {
     const x = Math.min(2, current.n);
     const forged = new Uint8Array(current.shares[x - 1]);
-    // The first byte of the data part, which every share has.
-    forged[19 + 32] ^= 0x01;
+    // The first byte of the data part, which every share has, after the
+    // header and, in an encrypted set, the key part.
+    forged[current.open ? 19 : 19 + 32] ^= 0x01;
     await withCheck(forged);
     block = `# plate ${x}, rewritten by someone who saw the secret, with a valid check\n${encode(forged)}`;
   }
@@ -1277,7 +1382,7 @@ function downloadPng() {
     }
     const cx = x0 + side / 2;
     ctx.font = "600 15px system-ui, sans-serif";
-    ctx.fillText(plateLabel({ tag: current.tag, x: i + 1, n: current.n, k: current.k }), cx, y0 + side);
+    ctx.fillText(plateLabel({ ...current, x: i + 1 }), cx, y0 + side);
     if (current.keys) {
       ctx.font = "14px ui-monospace, monospace";
       ctx.fillStyle = "#555";
@@ -1300,6 +1405,7 @@ function downloadCards() {
         n: current.n,
         k: current.k,
         tag: current.tag,
+        open: current.open,
         key: current.keys ? current.keys[i] : "",
         kind: current.kind,
       };
@@ -1362,6 +1468,19 @@ nEl.addEventListener("change", () => {
   runSplit();
 });
 
+// paintMode highlights the line beside the Encrypt switch that describes
+// its state.
+function paintMode() {
+  for (const el of document.querySelectorAll("[data-mode]")) {
+    el.classList.toggle("on", (el.dataset.mode === "on") === encryptEl.checked);
+  }
+}
+
+encryptEl.addEventListener("change", () => {
+  paintMode();
+  runSplit();
+});
+
 document.querySelectorAll(".ofn-n button").forEach((btn) =>
   btn.addEventListener("click", () => {
     const el = btn.dataset.for === "k" ? kEl : nEl;
@@ -1418,4 +1537,5 @@ for (const key of Object.keys(tabButtons)) {
   tabButtons[key].addEventListener("click", () => switchTab(key));
 }
 
+paintMode();
 runSplit();

@@ -29,8 +29,9 @@
     <section class="hero">
       <h1>Lose some plates.<br />Keep the wallet.</h1>
       <p>
-        shaQR puts one short share of the multisig descriptor on every signer's plate, beside
-        the seed, and <strong>any k of n plates</strong> bring it back.
+        A shaQR share is a Shamir share of a key and a parity part of the secret. One goes on
+        every signer's plate, beside the seed, and <strong>any k of n plates</strong> bring the
+        descriptor back.
       </p>
     </section>
 
@@ -85,6 +86,20 @@
             </span>
             plates recover it.
           </p>
+          <div class="mode">
+            <label class="switch">
+              <input id="encrypt" type="checkbox" role="switch" checked autocomplete="off"
+                aria-describedby="mode-help" />
+              <span class="track" aria-hidden="true"></span>
+              Encrypt
+            </label>
+            <p id="mode-help" class="mode-help">
+              <span data-mode="on"><b>On:</b> encrypted plates. Fewer than k of them show nothing of
+                the secret but its length.</span>
+              <span data-mode="off"><b>Off:</b> open plates, 32 bytes smaller. Each one shows part of
+                the secret.</span>
+            </p>
+          </div>
           <p id="split-status" class="status">Paste a descriptor or any other secret. It splits as you type.</p>
           <p id="split-note" class="note" hidden></p>
         </div>
@@ -172,10 +187,12 @@
 
           <h2>What shaQR does</h2>
           <p>
-            shaQR encrypts the secret with ChaCha20 under a one-time 32-byte key. It spreads the
-            ciphertext over the plates with a Reed-Solomon code, so each plate holds 1/k of it,
-            and splits the key with Shamir's scheme. The construction is Hugo Krawczyk's
-            "Secret Sharing Made Short", CRYPTO 1993.
+            A shaQR share is a Shamir share of a key and a parity part of the secret. shaQR
+            encrypts the secret with ChaCha20 under a one-time 32-byte key, cuts the ciphertext
+            into k parts and extends them to n with a Reed-Solomon code, so that any k parts
+            rebuild it. It splits the key with Shamir's scheme, and share x carries key share x
+            and part x. The construction is Hugo Krawczyk's "Secret Sharing Made Short", CRYPTO
+            1993.
           </p>
           <p>
             Any k plates rebuild the key and the ciphertext, and with them the secret. Fewer
@@ -192,25 +209,68 @@
             on ChaCha20 and SHA-256. The wallet's own keys rest on assumptions of the same kind.
           </p>
 
+          <h2>Encrypted or open</h2>
+          <p>
+            The Encrypt switch on the Split tab picks the kind of set. SPEC.md calls the two
+            kinds sealed and open.
+          </p>
+          <p>
+            <strong>Encrypted</strong>, the default, is the scheme above. Fewer than k plates show
+            nothing of the secret but its length. A descriptor gets a derived set, and any other
+            secret a session set.
+          </p>
+          <p>
+            <strong>Open</strong> leaves out the key and the encryption. A share is then the parity
+            part alone, 32 bytes shorter, which for the descriptors below is one QR version. The
+            first k plates hold slices of the secret in the clear, and the others hold mixes of
+            it. Any k plates still rebuild it, the check still catches a damaged plate and the set
+            id still stops a forged one. An open set is for data that must survive lost plates
+            and need not stay private.
+          </p>
+          <p>
+            A finder of one open plate of a descriptor learns some of its xpubs and that they
+            belong to a multisig wallet. Below k plates the wallet's addresses stay hidden, since
+            its script needs every key. This page refuses to cut an open set of anything that
+            holds a private key: an xprv, a tprv or a WIF key.
+          </p>
+
+          <h2>Packed descriptors</h2>
+          <p>
+            A descriptor is mostly keys in base58 and paths in decimal. Before a descriptor is
+            split it is packed, as DESCRIPTOR.md describes. Each key origin, extended key, hex key
+            and <code>/&lt;0;1&gt;/*</code> becomes a binary token, and the checksum is dropped,
+            since unpacking computes it again. Every other character stays as it is. A key with
+            its origin and children is 142 characters of text and packs to 75 bytes, or 80 for the
+            first key, whose origin path is written out.
+          </p>
+          <p>
+            Packing is exact. A receiver unpacks the payload, packs the text again and rejects the
+            payload when the bytes differ, so one wallet has one packed form and every tool cuts
+            the same plates from it. For the wallets below it makes the shares about a third
+            smaller, two or three QR versions.
+          </p>
+
           <h2>Sizes</h2>
           <div class="table-wrap">
             <table class="compare nums">
-              <tr><th>Quorum</th><th>Descriptor, bytes</th><th>Per plate, chars</th><th>QR version</th><th>Shamir share, QR version</th></tr>
-              <tr><td>2-of-3</td><td>457</td><td>462</td><td>11</td><td>15</td></tr>
-              <tr><td>3-of-5</td><td>743</td><td>493</td><td>12</td><td>20</td></tr>
-              <tr><td>10-of-20</td><td>2889</td><td>558</td><td>13</td><td>none</td></tr>
+              <tr><th>Wallet</th><th>Descriptor, bytes</th><th>Packed, bytes</th><th>Encrypted plate</th><th>Open plate</th><th>Unpacked, encrypted</th><th>Shamir share</th></tr>
+              <tr><td>2-of-3</td><td>457</td><td>252</td><td>298 · v9</td><td>246 · v8</td><td>462 · v11</td><td>424 · v11</td></tr>
+              <tr><td>3-of-5</td><td>743</td><td>404</td><td>312 · v9</td><td>261 · v8</td><td>493 · v12</td><td>667 · v14</td></tr>
+              <tr><td>10-of-20</td><td>2889</td><td>1545</td><td>342 · v10</td><td>291 · v9</td><td>558 · v13</td><td>2493 · v30</td></tr>
             </table>
           </div>
           <p>
-            The descriptors are <code>wsh(sortedmulti(...))</code> with key origins and
-            <code>/&lt;0;1&gt;/*</code> children. The QR versions are for alphanumeric mode at
-            error level L. The Shamir share carries the same 9 bytes of type, terminator, header
-            and check as a shaQR share.
+            The wallets are <code>wsh(sortedmulti(...))</code> of keys derived from seeds, with key
+            origins and <code>/&lt;0;1&gt;/*</code> children. A plate cell gives the characters of
+            the share text and its QR version, in alphanumeric mode at error level L. The Shamir
+            share holds the packed descriptor and the same 9 bytes of type, terminator, header and
+            check as a shaQR share.
           </p>
           <p>
             Plates grow slowly with the quorum, because each holds 1/k of the descriptor. Small
             secrets go the other way. A 20-byte TOTP seed split 2-of-3 makes 66-byte shares,
-            against 29 for a Shamir share. Most of the difference is the 32-byte key part.
+            against 29 for a Shamir share. Most of the difference is the 32-byte key part, and an
+            open set, which has none, makes 34-byte shares.
           </p>
 
           <h2>What every plate carries</h2>
@@ -220,18 +280,19 @@
             still there to try again.
           </p>
           <p>
-            <strong>A set id.</strong> Sixteen bytes that commit to the key and the ciphertext.
-            Recovery recomputes it and outputs nothing when it differs. Anyone can compute a
-            check, so the check stops no forger. Someone who was present at an earlier recovery
-            knows the key and the ciphertext. Without the id, they could make a plate that
-            changes what a later recovery outputs. A recovery that uses such a plate fails the
-            id, so the plate can stop a recovery and cannot change its result. With a spare
-            plate, the receiver names the forged one.
+            <strong>A set id.</strong> Sixteen bytes that commit to the key and the ciphertext, or
+            in an open set to the secret itself. Recovery recomputes it and outputs nothing when
+            it differs. Anyone can compute a check, so the check stops no forger. Someone who was
+            present at an earlier recovery knows the key and the ciphertext. Without the id, they
+            could make a plate that changes what a later recovery outputs. A recovery that uses
+            such a plate fails the id, so the plate can stop a recovery and cannot change its
+            result. With a spare plate, the receiver names the forged one.
           </p>
           <p>
             <strong>A tag.</strong> The first two bytes of the id, in hex after a
-            <code>#</code>, as in <code>#2714</code>. It tells sets apart on a shelf and in a
-            scanner. A plate of another wallet lands in a set of its own and spoils nothing.
+            <code>#</code>, as in <code>#7B63</code>. It tells sets apart on a shelf and in a
+            scanner. A plate of another wallet lands in a set of its own and spoils nothing, and
+            so does an open plate among encrypted ones.
           </p>
           <p>
             <strong>Derived sets.</strong> A descriptor backup draws its key from the canonical
@@ -243,7 +304,8 @@
             nothing new by it. Each xpub carries as many unknown bits as the seed behind it,
             about 128 for a 12-word seed, so someone missing even one xpub can no more guess the
             descriptor than guess that seed. Any other secret gets a session set, with a fresh
-            random key each time.
+            random key each time. An open set has no key, so it too comes out the same every
+            time.
           </p>
           <p>
             <strong>An open spec.</strong> SPEC.md and DESCRIPTOR.md are CC0. There are two
@@ -255,7 +317,8 @@
           <div class="table-wrap">
             <table class="compare">
               <tr><th></th><th>Per plate</th><th>Rebuilt from</th><th>One plate shows</th></tr>
-              <tr class="ours"><td>shaQR</td><td>1/k of the secret, plus 55 bytes</td><td>any k of n plates</td><td>its length</td></tr>
+              <tr class="ours"><td>shaQR, encrypted</td><td>1/k of the secret, plus 55 bytes</td><td>any k of n plates</td><td>its length</td></tr>
+              <tr class="ours"><td>shaQR, open</td><td>1/k of the secret, plus 23 bytes</td><td>any k of n plates</td><td>on one of the first k plates, its part in the clear</td></tr>
               <tr><td>SLIP-39 Shamir</td><td>the whole secret</td><td>any k of n plates</td><td>nothing</td></tr>
               <tr><td>BBQr parity</td><td>1/k of the descriptor, plain or compressed</td><td>any k of n plates</td><td>on a data plate, its part in the clear</td></tr>
               <tr><td>UR fountain</td><td>1/k, plus a header per part</td><td>only some sets of k plates</td><td>pieces of the descriptor</td></tr>
@@ -266,24 +329,31 @@
           <h3>Shamir shares as long as the secret</h3>
           <p>
             SLIP-39 splits a seed this way. Each share is as long as the secret, and in return
-            the secrecy is perfect. For the 3-of-5 descriptor above that is a version 20 code on
-            every plate. The 10-of-20 does not fit one QR code at all.
+            the secrecy is perfect. For the 3-of-5 descriptor above, packed, that is a version 14
+            code on every plate, and for the 10-of-20 a version 30. As text the 3-of-5 needs
+            version 20, and the 10-of-20 does not fit one QR code at all.
           </p>
 
           <h3>BBQr parity parts</h3>
           <p>
             An earlier version of this page proposed them. They cut the descriptor into k data
             parts and add parity parts, so any k plates rebuild it. In plain mode the data plates
-            keep the descriptor readable. For the 3-of-5 descriptor above, a compressed part is
-            320 characters, a version 9 code, against shaQR's 493 and version 12. A part carries
-            an 8-character header where a shaQR share carries 55 bytes of key, id, check and
-            header, and shaQR compresses nothing. In hex, the mode a pen and a table can read, a
-            part is 532 characters and version 12, the same version as shaQR's.
+            keep the descriptor readable.
           </p>
           <p>
-            They carry no key, no check and no set id. A data plate holds its part of the
-            descriptor in the clear. Damage to a part shows only after the whole descriptor is
-            rebuilt, and nothing ties the parts of one set to each other.
+            Compressed, a part comes out about as long as an encrypted shaQR share. For the
+            3-of-5 above a compressed data part is 320 characters and a parity part 328, both
+            version 9 codes. An encrypted shaQR share of the packed descriptor is 312
+            characters, also version 9, and an open one 261 characters, version 8. For the
+            10-of-20 a compressed part is version 9, one below an encrypted shaQR share and level
+            with an open one. A part carries an 8-character header where a shaQR share carries
+            55 bytes of key, id, check and header, or 23 in an open set. In hex, the mode a pen
+            and a table can read, a data part of the 3-of-5 is 532 characters, version 12.
+          </p>
+          <p>
+            They carry no check and no set id. Damage to a part shows only after the whole
+            descriptor is rebuilt, and nothing ties the parts of one set to each other. An open
+            shaQR set shows as much as a BBQr set and carries both.
           </p>
 
           <h3>UR fountain codes</h3>
@@ -297,8 +367,8 @@
             fragments give only 2<sup>k</sup> − 1 distinct parts, and a set in which every k of
             them are independent has at most k + 1 members: the k fragments and their XOR. One
             part per plate therefore gives only n-of-n and (n−1)-of-n. A code in which every k of
-            n parts decode is what Reed-Solomon gives, and it is the code shaQR spreads the
-            ciphertext with.
+            n parts decode is what Reed-Solomon gives, and it is the code of shaQR's parity
+            parts.
           </p>
 
           <h3>A key derived from the xpubs</h3>
@@ -309,9 +379,9 @@
             coordinator, a watch-only wallet, a laptop that once imported a key.
           </p>
           <p>
-            A shaQR set opens with k plates. For a descriptor backup the key also follows from
-            the whole descriptor, which only someone who already has every xpub could supply.
-            One xpub opens nothing.
+            An encrypted shaQR set opens with k plates. For a descriptor backup the key also
+            follows from the whole descriptor, which only someone who already has every xpub
+            could supply. One xpub opens nothing.
           </p>
 
           <h2>Links</h2>
@@ -353,7 +423,7 @@
 
     <footer>
       <p class="draft">
-        shaQR is Draft 3 of 23 September 2026. Nobody has reviewed it. Do not use it with real
+        shaQR is Draft 4 of 24 September 2026. Nobody has reviewed it. Do not use it with real
         secrets yet.
       </p>
       <p>Everything runs in this tab. Nothing is uploaded, nothing is stored.</p>

@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-// Cut the 3-of-5 example descriptor into a derived set and write its plates
-// to cards/ as 85 x 55 mm SVG cards, plus an A4 sheet (and a PDF of it when
-// inkscape is installed). A derived set is a function of the descriptor, so
-// running this again writes the same cards. It deletes the cards of other
-// sets from cards/ first, so that cards/ holds one set.
+// Pack the 3-of-5 example descriptor, cut it into a derived set and write
+// its plates to cards/ as 85 x 55 mm SVG cards, plus an A4 sheet (and a
+// PDF of it when inkscape is installed). A derived set is a function of
+// the descriptor, so running this again writes the same cards. It deletes
+// the cards of other sets from cards/ first, so that cards/ holds one set.
 //
 // An ES module; node 22 or later runs it as `node tools/make-cards.js`.
 
@@ -14,7 +14,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { split, combine, encode, parseHeader, TypeDescriptor } from "../js/shaqr.js";
-import { canonical, quorum, verify } from "../js/descriptor.js";
+import { canonical, pack, quorum, unpack } from "../js/descriptor.js";
 import { buildCardSvg, buildSheetSvg, fileName, keyLabel } from "../cards.js";
 import { EXAMPLES } from "../examples.js";
 
@@ -34,13 +34,11 @@ const desc = canonical(EXAMPLES["3of5"]);
 const q = quorum(desc);
 const k = q.k;
 const n = q.keys.length;
-const payload = new TextEncoder().encode(desc);
+const payload = await pack(desc);
 const shares = await split(payload, TypeDescriptor, k, n, { derived: true });
 
 const back = await combine(shares.slice(-k));
-const text = new TextDecoder().decode(back.payload);
-if (back.type !== TypeDescriptor || text !== desc) throw new Error("round trip failed");
-verify(text);
+if (back.type !== TypeDescriptor || (await unpack(back.payload)) !== desc) throw new Error("round trip failed");
 
 const { tag } = await parseHeader(shares[0]);
 const cards = shares.map((sh, i) => {
@@ -54,6 +52,7 @@ const cards = shares.map((sh, i) => {
     n,
     k,
     tag,
+    open: false,
     key: keyLabel(q.keys[i]),
     kind: "descriptor",
   };

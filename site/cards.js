@@ -2,10 +2,11 @@
 // glyph outlines in vendor/mono-glyphs.js, so a laser or an engraver never
 // has to resolve a font.
 //
-// A card is { text, matrix: { size, data }, x, n, k, tag, key, kind }:
-// the share text, its QR matrix, the plate index x and the set's n and k,
-// the set tag ("#2714"), the key the plate belongs to for a descriptor
-// (keyLabel below, or "") and kind, "descriptor" or "text".
+// A card is { text, matrix: { size, data }, x, n, k, tag, open, key,
+// kind }: the share text, its QR matrix, the plate index x and the set's n
+// and k, the set tag ("#7B63"), whether the set is open, the key the plate
+// belongs to for a descriptor (keyLabel below, or "") and kind,
+// "descriptor" or "text".
 //
 // Every label line on a card starts with "#". A share runs on across
 // white space when it is typed back, and SPEC.md asks that a label next
@@ -108,10 +109,11 @@ function layout(card, glyphs) {
 }
 
 // labels returns the head and foot lines of a card. The head carries the
-// set, the foot the key and the quorum. Both start with "#".
+// set, with "open" after it for an open set, and the foot the key and the
+// quorum. Both start with "#".
 function labels(card, glyphs) {
   const set = card.tag.toUpperCase();
-  const headLeft = `${set} shaQR ${card.k}-of-${card.n}`;
+  const headLeft = `${set} shaQR ${card.k}-of-${card.n}${card.open ? " open" : ""}`;
   const headRight = `PLATE ${String(card.x).padStart(2, "0")}/${String(card.n).padStart(2, "0")}`;
   const what = card.kind === "descriptor" ? "THE WALLET" : "THE SECRET";
   const room = Math.floor((CARD_W - 2 * MARGIN) / charWidth(glyphs, FOOT_MM));
@@ -154,7 +156,7 @@ function centered(glyphs, str, y, mm, mode, color) {
 
 // buildSheetSvg lays the cards of one set out on A4 paper, two across.
 export function buildSheetSvg(cards, glyphs, { mode = "solid" } = {}) {
-  const [{ k, n, kind }] = cards;
+  const [{ k, n, kind, open }] = cards;
   const cols = 2;
   const gapX = 20;
   const gapY = 16;
@@ -166,7 +168,8 @@ export function buildSheetSvg(cards, glyphs, { mode = "solid" } = {}) {
   out.push(`<svg xmlns="http://www.w3.org/2000/svg" width="210mm" height="297mm" viewBox="0 0 210 297">`);
   out.push(`<rect width="210" height="297" fill="#fff"/>`);
   out.push(centered(glyphs, "shaQR short secret shares", 20, 6, mode));
-  out.push(centered(glyphs, `any ${k} of ${n} plates rebuild ${what}`, 27, 3, mode, "#6f675e"));
+  const sub = `any ${k} of ${n} plates rebuild ${what}${open ? ", and each shows part of it" : ""}`;
+  out.push(centered(glyphs, sub, 27, 3, mode, "#6f675e"));
 
   cards.forEach((card, i) => {
     const col = i % cols;
