@@ -21,6 +21,7 @@ var (
 	errTruncated = errors.New("descriptor: packed token truncated")
 	errNumber    = errors.New("descriptor: packed number not below 2^32 in five bytes")
 	errNoOrigin  = errors.New("descriptor: packed token needs an origin token before it")
+	errTooLong   = errors.New("descriptor: the text is longer than 8 times its packed bytes plus 64")
 )
 
 // The markers that start the tokens of a packed descriptor. A key
@@ -60,12 +61,29 @@ const (
 // /<0;1>/* become binary tokens, and the "#" and checksum are dropped.
 // Pack verifies the checksum. It does not check that desc is canonical,
 // since a receiver packs what it unpacked to check it, and that need not
-// be canonical either.
+// be canonical either. It refuses a text that is longer, without its "#"
+// and checksum, than maxText of its packed bytes, which Unpack would
+// refuse.
 func Pack(desc string) ([]byte, error) {
 	if err := Verify(desc); err != nil {
 		return nil, err
 	}
-	return pack(desc[:len(desc)-9]), nil
+	body := desc[:len(desc)-9]
+	p := pack(body)
+	if len(body) > maxText(len(p)) {
+		return nil, errTooLong
+	}
+	return p, nil
+}
+
+// maxText is the length of the longest text, without its "#" and
+// checksum, that a packed payload of n bytes may unpack to: 8 * n + 64
+// (DESCRIPTOR.md Packed payload). Only the markSamePath token unpacks to
+// more than 8 times its bytes, since it writes a path again, and without
+// the bound such tokens after one long origin unpack to a text quadratic
+// in the payload.
+func maxText(n int) int {
+	return 8*n + 64
 }
 
 // pack packs s, a descriptor without its "#" and checksum.
@@ -255,12 +273,16 @@ func isLowerHex(s string) bool {
 // holds (DESCRIPTOR.md Packed payload). It packs that text again and
 // returns ErrNotPacked when the bytes differ from packed, so that every
 // descriptor has one packed form. Bytes that do not unpack at all give
-// another error.
+// another error, and so do bytes whose text grows longer than maxText of
+// them, which Unpack finds after the token that passes it.
 func Unpack(packed []byte) (string, error) {
 	u := unpacker{p: packed}
 	for u.i < len(packed) {
 		if err := u.next(); err != nil {
 			return "", err
+		}
+		if u.b.Len() > maxText(len(packed)) {
+			return "", errTooLong
 		}
 	}
 	s := u.b.String()

@@ -32,6 +32,10 @@ for (const v of vectors.canonical) {
 for (const v of vectors.pack) {
   test(`pack: ${v.name}`, async () => {
     assert.equal(canonical(v.text), v.text);
+    if (v.error) {
+      await assert.rejects(pack(v.text), code(v.error));
+      return;
+    }
     assert.equal(hex(await pack(v.text)), v.packed);
     assert.equal(await unpack(bytes(v.packed)), v.text);
   });

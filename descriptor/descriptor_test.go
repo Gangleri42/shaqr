@@ -209,8 +209,11 @@ func makeVectors() vectors {
 		v.Quorum = append(v.Quorum, c)
 	}
 	for _, c := range packInputs() {
-		p, _ := Pack(c.Text)
-		c.Packed = hex.EncodeToString(p)
+		if p, err := Pack(c.Text); err != nil {
+			c.Error = "invalid"
+		} else {
+			c.Packed = hex.EncodeToString(p)
+		}
 		v.Pack = append(v.Pack, c)
 	}
 	v.Unpack = unpackInputs()

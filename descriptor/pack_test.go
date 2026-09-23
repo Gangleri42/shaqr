@@ -13,11 +13,14 @@ import (
 	"testing"
 )
 
-// A packCase is a canonical text and its packed payload, in hex.
+// A packCase is a canonical text and its packed payload, in hex, or the
+// error Pack gives: "invalid" for a text longer than 8 times its packed
+// bytes plus 64.
 type packCase struct {
 	Name   string `json:"name"`
 	Text   string `json:"text"`
-	Packed string `json:"packed"`
+	Packed string `json:"packed,omitempty"`
+	Error  string `json:"error,omitempty"`
 }
 
 // An unpackCase is a payload, in hex, that Unpack refuses, with the
@@ -59,6 +62,12 @@ func packInputs() []packCase {
 	uncompressed := alter(xpubV1M, func(raw []byte) { raw[offKey] = 4 })
 	// The last character of the xpub one higher, so that its check fails.
 	badCheck := xpubV1M[:len(xpubV1M)-1] + "9"
+	// Five hex keys, G to 5G, under one origin path of 70 steps. Every
+	// 0x92 token writes the 70 steps again.
+	var longPath []string
+	for _, k := range []string{hexG, hex2G, hex3G, hex4G, hex5G} {
+		longPath = append(longPath, "[d34db33f"+strings.Repeat("/2147483647h", 70)+"]"+k)
+	}
 	return []packCase{
 		{Name: "DESCRIPTOR.md Sizes, 2-of-3, 457 bytes", Text: sizes2of3},
 		{Name: "DESCRIPTOR.md Sizes, 3-of-5, 743 bytes", Text: sizes3of5},
@@ -85,7 +94,29 @@ func packInputs() []packCase {
 		{Name: "an origin with an index of 2^31 stays text", Text: withSum("wpkh([d34db33f/2147483648]" + xpubV1M + multipath + ")")},
 		{Name: "an extended key with a bad base58check stays text", Text: withSum("wpkh(" + badCheck + multipath + ")")},
 		{Name: "an address stays text", Text: withSum("addr(mkmZxiEcEd8ZqjQWVZuC6so5dFMKEFpN2j)")},
+		{Name: "five keys under an origin path of 70 steps, longer than 8 times the packed bytes plus 64", Text: withSum("wsh(multi(2," + strings.Join(longPath, ",") + "))")},
 	}
+}
+
+// The points 4G and 5G of secp256k1 as compressed hex keys.
+const (
+	hex4G = "02e493dbf1c10d80f3581e4904930b1404cc6c13900ee0758474fa94abe8c4cd13"
+	hex5G = "022f8bde4d1a07209355b4a7250a5c5128e88b84bddc619ab7cba8d569b240efe4"
+)
+
+// samePathBomb returns a payload of about n bytes: an origin token of
+// n/2 steps, each the largest number of one byte, and then as many 0x92
+// tokens as fit, each of which unpacks to the whole path again. Without
+// the bound of DESCRIPTOR.md, n bytes would unpack to about n * n / 5
+// characters.
+func samePathBomb(n int) []byte {
+	b := []byte{markOrigin, 0xd3, 0x4d, 0xb3, 0x3f}
+	b = binary.AppendUvarint(b, uint64(n/2))
+	b = append(b, bytes.Repeat([]byte{0x7f}, n/2)...)
+	for len(b)+5 <= n {
+		b = append(b, markSamePath, 0xd3, 0x4d, 0xb3, 0x3f)
+	}
+	return b
 }
 
 // byHand returns the pieces of the packed payload of
@@ -108,6 +139,9 @@ func unpackInputs() []unpackCase {
 	origin, key, explicit, raw := byHand()
 	b, _ := hex.DecodeString(hexG)
 	hexKey := "\x95" + string(b)
+	// An origin of 64 steps and 60 tokens with the same steps: 370 bytes
+	// that would unpack to 16226 characters, which pack to them again.
+	sameSteps := "\x91\xd3\x4d\xb3\x3f\x40" + strings.Repeat("\x7f", 64) + strings.Repeat("\x92\xd3\x4d\xb3\x3f", 60)
 	cases := []unpackCase{
 		{Name: "the children left as text", Packed: "wpkh(" + origin + key + multipath + ")", Error: "not-packed"},
 		{Name: "an origin left as text", Packed: "wpkh([d34db33f/0h]" + explicit + "\x93)", Error: "not-packed"},
@@ -131,6 +165,7 @@ func unpackInputs() []unpackCase {
 		{Name: "an implied depth of 256", Packed: "wpkh(\x91\xd3\x4d\xb3\x3f\x80\x02" + strings.Repeat("\x00", 256) + key + "\x93)", Error: "invalid"},
 		{Name: "the same steps with no origin before", Packed: "wpkh(\x92\xd3\x4d\xb3\x3f" + explicit + "\x93)", Error: "invalid"},
 		{Name: "a character the checksum does not allow", Packed: "wpkh(\x01" + origin + key + "\x93)", Error: "invalid"},
+		{Name: "0x92 tokens that unpack to more than 8 times the packed bytes plus 64", Packed: sameSteps, Error: "invalid"},
 	}
 	for i := range cases {
 		cases[i].Packed = hex.EncodeToString([]byte(cases[i].Packed))
@@ -155,6 +190,12 @@ func TestPackVectors(t *testing.T) {
 			t.Errorf("%s: text is not canonical: %q, %v", c.Name, got, err)
 		}
 		p, err := Pack(c.Text)
+		if c.Error != "" {
+			if err == nil {
+				t.Errorf("%s: Pack = %x, want error %q", c.Name, p, c.Error)
+			}
+			continue
+		}
 		if err != nil || hex.EncodeToString(p) != c.Packed {
 			t.Errorf("%s: Pack = %x, %v\nwant %s", c.Name, p, err, c.Packed)
 			continue
@@ -171,6 +212,30 @@ func TestUnpackVectors(t *testing.T) {
 		got, err := Unpack(p)
 		if err == nil || errors.Is(err, ErrNotPacked) != (c.Error == "not-packed") {
 			t.Errorf("%s: Unpack = %q, %v, want error %q", c.Name, got, err, c.Error)
+		}
+	}
+}
+
+// TestUnpackBound checks that Unpack stops a payload made to fill memory
+// as soon as its text passes the bound, and refuses the bytes of the pack
+// vectors that Pack refuses.
+func TestUnpackBound(t *testing.T) {
+	for _, n := range []int{1 << 10, 1 << 16} {
+		if _, err := Unpack(samePathBomb(n)); !errors.Is(err, errTooLong) {
+			t.Errorf("a payload of %d bytes: %v", n, err)
+		}
+	}
+	for _, c := range loadVectors(t).Pack {
+		if c.Error == "" {
+			continue
+		}
+		body := c.Text[:len(c.Text)-9]
+		p := pack(body)
+		if len(body) <= maxText(len(p)) {
+			t.Errorf("%s: %d characters from %d bytes are within the bound", c.Name, len(body), len(p))
+		}
+		if _, err := Unpack(p); !errors.Is(err, errTooLong) {
+			t.Errorf("%s: Unpack of its bytes: %v", c.Name, err)
 		}
 	}
 }
@@ -238,8 +303,9 @@ func TestMutations(t *testing.T) {
 // form of the text it returns.
 func FuzzUnpack(f *testing.F) {
 	for _, c := range packInputs() {
-		p, _ := Pack(c.Text)
-		f.Add(p)
+		if p, err := Pack(c.Text); err == nil {
+			f.Add(p)
+		}
 	}
 	for _, c := range unpackInputs() {
 		p, _ := hex.DecodeString(c.Packed)

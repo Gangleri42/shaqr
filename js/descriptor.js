@@ -359,11 +359,25 @@ const versions = [0x0488b21e, 0x043587cf, 0x0488ade4, 0x04358394];
 // are dropped. pack verifies the checksum and throws a DescriptorError as
 // verify does. It does not check that desc is canonical, since a receiver
 // packs what it unpacked to check it, and that need not be canonical
-// either.
+// either. It refuses, as invalid, a text that is longer, without its "#"
+// and checksum, than maxText of its packed bytes, which unpack would
+// refuse.
 export async function pack(desc) {
   verify(desc);
-  return packText(desc.slice(0, -9));
+  const body = desc.slice(0, -9);
+  const packed = await packText(body);
+  if (body.length > maxText(packed.length)) throw tooLong();
+  return packed;
 }
+
+// maxText is the length of the longest text, without its "#" and checksum,
+// that a packed payload of n bytes may unpack to: 8 * n + 64 (DESCRIPTOR.md,
+// Packed payload). Only the markSamePath token unpacks to more than 8 times
+// its bytes, since it writes a path again, and without the bound such
+// tokens after one long origin unpack to a text quadratic in the payload.
+const maxText = (n) => 8 * n + 64;
+
+const tooLong = () => invalid('the text is longer than 8 times its packed bytes plus 64');
 
 // packText packs s, a descriptor without its "#" and checksum. At each
 // offset it writes the bytes of the first rule of DESCRIPTOR.md that
@@ -503,10 +517,14 @@ const toHex = (b) => Array.from(b, (x) => x.toString(16).padStart(2, '0')).join(
 // packs that text again and throws a DescriptorError with the code
 // not-packed when the bytes differ from packed, so that every descriptor
 // has one packed form. Bytes that do not unpack at all throw one with the
-// code invalid.
+// code invalid, and so do bytes whose text grows longer than maxText of
+// them, which unpack finds after the token that passes it.
 export async function unpack(packed) {
   const u = new Unpacker(packed);
-  while (u.i < packed.length) await u.next();
+  while (u.i < packed.length) {
+    await u.next();
+    if (u.length > maxText(packed.length)) throw tooLong();
+  }
   const s = u.pieces.join('');
   const sum = checksum(s);
   const again = await packText(s);
@@ -517,13 +535,15 @@ export async function unpack(packed) {
 }
 
 // An Unpacker reads the tokens of p from offset i and collects their text
-// in pieces. steps are those of the last origin token, null before the
-// first, and afterOrigin is whether it is the token read last.
+// in pieces, whose length is length. steps are those of the last origin
+// token, null before the first, and afterOrigin is whether it is the token
+// read last.
 class Unpacker {
   constructor(p) {
     this.p = p;
     this.i = 0;
     this.pieces = [];
+    this.length = 0;
     this.steps = null;
     this.afterOrigin = false;
   }
@@ -533,13 +553,16 @@ class Unpacker {
     const c = this.p[this.i++];
     const afterOrigin = this.afterOrigin;
     this.afterOrigin = false;
-    if (c < markKey) this.pieces.push(String.fromCharCode(c));
-    else if (c < markGeneric) this.pieces.push(await this.key(c, afterOrigin));
-    else if (c === markGeneric) this.pieces.push(await encodeExtended(this.take(78)));
-    else if (c === markOrigin || c === markSamePath) this.origin(c === markSamePath);
-    else if (c === markChildren) this.pieces.push(multipath);
-    else if (c === markHex32 || c === markHex33) this.pieces.push(toHex(this.take(32 + c - markHex32)));
+    let piece;
+    if (c < markKey) piece = String.fromCharCode(c);
+    else if (c < markGeneric) piece = await this.key(c, afterOrigin);
+    else if (c === markGeneric) piece = await encodeExtended(this.take(78));
+    else if (c === markOrigin || c === markSamePath) piece = this.origin(c === markSamePath);
+    else if (c === markChildren) piece = multipath;
+    else if (c === markHex32 || c === markHex33) piece = toHex(this.take(32 + c - markHex32));
     else throw unusedMarker(c);
+    this.pieces.push(piece);
+    this.length += piece.length;
   }
 
   // take reads the next n bytes.
@@ -563,7 +586,7 @@ class Unpacker {
     throw invalid('packed number not below 2^32 in five bytes');
   }
 
-  // origin reads an origin token and collects it as "[fingerprint/steps]"
+  // origin reads an origin token and returns it as "[fingerprint/steps]"
   // with h. same marks a markSamePath token, which takes the steps of the
   // last origin token.
   origin(same) {
@@ -572,7 +595,7 @@ class Unpacker {
     if (!same) this.steps = this.readSteps();
     this.afterOrigin = true;
     const steps = this.steps.map((v) => `/${Math.floor(v / 2)}${v % 2 ? 'h' : ''}`);
-    this.pieces.push(`[${toHex(fp)}${steps.join('')}]`);
+    return `[${toHex(fp)}${steps.join('')}]`;
   }
 
   // readSteps reads the number of steps and the steps of a markOrigin
