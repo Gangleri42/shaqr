@@ -4,6 +4,7 @@ package descriptor
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -40,10 +41,6 @@ const (
 
 	// The unspendable internal key of BIP 341.
 	hexNUMS = "50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0"
-
-	// The 2-of-3 of SPEC.md Sizes, 457 bytes with its checksum.
-	sizes457 = "wsh(sortedmulti(2,[00000001/48h/0h/0h/2h]" + xpubV1M + "/<0;1>/*,[00000002/48h/0h/0h/2h]" + xpubV1H0 +
-		"/<0;1>/*,[00000003/48h/0h/0h/2h]" + xpubV1H01 + "/<0;1>/*))#tznslc7n"
 )
 
 // The 2-of-3 wallet that most tests write in many ways.
@@ -87,12 +84,14 @@ func wrap(s string) string {
 	return strings.Join(append(lines, s), "\n")
 }
 
-// A canonicalCase has either the canonical text of its input or the
-// error it gives: "checksum" for ErrChecksum, "invalid" for any other.
+// A canonicalCase has either the canonical text of its input and the
+// packed payload of that text, in hex, or the error it gives: "checksum"
+// for ErrChecksum, "invalid" for any other.
 type canonicalCase struct {
 	Name      string `json:"name"`
 	Input     string `json:"input"`
 	Canonical string `json:"canonical,omitempty"`
+	Packed    string `json:"packed,omitempty"`
 	Error     string `json:"error,omitempty"`
 }
 
@@ -108,6 +107,8 @@ type quorumCase struct {
 type vectors struct {
 	Canonical []canonicalCase `json:"canonical"`
 	Quorum    []quorumCase    `json:"quorum"`
+	Pack      []packCase      `json:"pack"`
+	Unpack    []unpackCase    `json:"unpack"`
 }
 
 // canonicalInputs are the inputs of the canonicalisation vectors. The
@@ -128,12 +129,16 @@ func canonicalInputs() []canonicalCase {
 		{Name: "wallet, wrapped over lines, checksum of the text without white space", Input: wrap(withSum(mixed))},
 		{Name: "multi keeps the key order and unifies the children", Input: "wsh(multi(2," + upper(walletKey(0, "'", "/0/*")) + "," + walletKey(1, "h", "") + "," + walletKey(2, "h", "/<0;1>/*") + "))"},
 		{Name: "sortedmulti_a in tr with an internal key", Input: "tr([aabbccdd/86h/0h/0h]" + xpubV2M + "/0/*,sortedmulti_a(2," + walletKey(2, "'", "") + "," + walletKey(0, "h", "/0/*") + "," + walletKey(1, "h", "/<0;1>/*") + "))"},
-		{Name: "hex keys keep their spelling and gain no children", Input: "wsh(sortedmulti(2,[D34DB33F/48'/0'/0'/2']" + hex3G + "," + strings.ToUpper(hexG) + "," + hex2G + "))"},
+		{Name: "hex keys in lower case, without children", Input: "wsh(sortedmulti(2,[D34DB33F/48'/0'/0'/2']" + hex3G + "," + strings.ToUpper(hexG) + "," + hex2G + "))"},
+		{Name: "an x-only hex key in lower case, a hash as given", Input: "tr(" + strings.ToUpper(hexNUMS) + ",and_v(v:pk(" + strings.ToUpper(hex2G[2:]) + "),sha256(" + strings.Repeat("AB", 32) + ")))"},
 		{Name: "other children stay as given", Input: wallet(walletKey(0, "h", "/1/*"), walletKey(1, "h", "/*"), walletKey(2, "'", "/0/*'"))},
 		{Name: "tpub keys", Input: "sh(wsh(sortedmulti(2,[11111111/48h/1h/0h/1h]" + tpubV1M + "/0/*,[00000000/48'/1'/0'/1']" + tpubV1H0 + ")))"},
 		{Name: "xprv key", Input: "wpkh([aabbccdd/84'/0'/0']" + xprvV1M + "/0/*)"},
 		{Name: "miniscript keeps its structure", Input: miniscript},
-		{Name: "SPEC.md Sizes, 457 bytes", Input: sizes457},
+		{Name: "DESCRIPTOR.md Sizes, 2-of-3, 457 bytes", Input: sizes2of3},
+		{Name: "tr(musig(A,B)/<0;1>/*) stays as it is", Input: "tr(musig(" + walletKey(0, "h", "") + "," + walletKey(1, "h", "") + ")/<0;1>/*)"},
+		{Name: "musig() keys keep the children they have", Input: "tr(" + hexNUMS + ",pk(musig(" + walletKey(0, "'", "/0/*") + "," + walletKey(1, "h", "/<0;1>/*") + "," + walletKey(2, "h", "") + ")))"},
+		{Name: "a key beside a musig() gains /<0;1>/*", Input: "tr(" + hexNUMS + ",{pk(musig(" + walletKey(0, "h", "") + "," + walletKey(1, "h", "") + ")/<0;1>/*),pk(" + walletKey(2, "h", "/0/*") + ")})"},
 		{Name: "wrong checksum", Input: walletCanonical[:len(walletCanonical)-1] + "q"},
 		{Name: "empty checksum", Input: wallet(walletKey(0, "h", "")) + "#"},
 		{Name: "unbalanced parentheses", Input: "wsh(sortedmulti(2," + walletKey(0, "h", "") + ")"},
@@ -164,7 +169,8 @@ func quorumInputs() []quorumCase {
 		{Name: "sh(wsh(multi)), keys without origin, white space", Input: "sh(wsh(multi( 3 , " + keys(2) + "," + xpubV1M + ",\n" + xpubV1H0 + "/0/*," + xpubV1H01 + ")))"},
 		{Name: "hex keys", Input: "wsh(sortedmulti(2,[d34db33f/48h/0h/0h/2h]" + hex3G + "," + hexG + "," + hex2G + "))"},
 		{Name: "multi with a hash lock", Input: "wsh(and_v(v:multi(2," + keys(3) + "),sha256(" + strings.Repeat("ab", 32) + ")))"},
-		{Name: "SPEC.md Sizes, 457 bytes", Input: sizes457},
+		{Name: "DESCRIPTOR.md Sizes, 2-of-3", Input: sizes2of3},
+		{Name: "DESCRIPTOR.md Sizes, 10-of-20", Input: sizes10of20},
 		{Name: "tr internal key beside sortedmulti_a", Input: "tr([aabbccdd/86h/0h/0h]" + xpubV2M + "/<0;1>/*,sortedmulti_a(2," + keys(3) + "))"},
 		{Name: "tr unspendable internal key", Input: "tr(" + hexNUMS + ",sortedmulti_a(2," + keys(3) + "))"},
 		{Name: "two multi_a in a tap tree", Input: "tr(" + hexNUMS + ",{multi_a(1," + keys(1) + "),multi_a(2," + keys(2) + ")})"},
@@ -188,7 +194,8 @@ func makeVectors() vectors {
 		case err != nil:
 			c.Error = "invalid"
 		default:
-			c.Canonical = out
+			p, _ := Pack(out)
+			c.Canonical, c.Packed = out, hex.EncodeToString(p)
 		}
 		v.Canonical = append(v.Canonical, c)
 	}
@@ -201,6 +208,12 @@ func makeVectors() vectors {
 		}
 		v.Quorum = append(v.Quorum, c)
 	}
+	for _, c := range packInputs() {
+		p, _ := Pack(c.Text)
+		c.Packed = hex.EncodeToString(p)
+		v.Pack = append(v.Pack, c)
+	}
+	v.Unpack = unpackInputs()
 	return v
 }
 
@@ -292,6 +305,14 @@ func TestCanonicalVectors(t *testing.T) {
 		if again, err := Canonical(got); again != got || err != nil {
 			t.Errorf("%s: canonical text changes again: %q, %v", c.Name, again, err)
 		}
+		p, err := Pack(got)
+		if err != nil || hex.EncodeToString(p) != c.Packed {
+			t.Errorf("%s: Pack = %x, %v\nwant %s", c.Name, p, err, c.Packed)
+			continue
+		}
+		if back, err := Unpack(p); back != got || err != nil {
+			t.Errorf("%s: Unpack = %q, %v", c.Name, back, err)
+		}
 	}
 }
 
@@ -338,10 +359,26 @@ func TestOneWallet(t *testing.T) {
 	}
 }
 
+// TestSizes checks the wallets of DESCRIPTOR.md Sizes: each is
+// canonical, and its text and packed payload have the lengths given
+// there.
 func TestSizes(t *testing.T) {
-	got, err := Canonical(sizes457)
-	if err != nil || got != sizes457 || len(got) != 457 {
-		t.Errorf("Canonical of the Sizes descriptor = %d bytes, %v", len(got), err)
+	tests := []struct {
+		desc         string
+		text, packed int
+	}{
+		{sizes2of3, 457, 252},
+		{sizes3of5, 743, 404},
+		{sizes10of20, 2889, 1545},
+	}
+	for _, tc := range tests {
+		got, err := Canonical(tc.desc)
+		if err != nil || got != tc.desc || len(got) != tc.text {
+			t.Errorf("Canonical of the %d byte wallet = %d bytes, %v", tc.text, len(got), err)
+		}
+		if p, err := Pack(tc.desc); len(p) != tc.packed || err != nil {
+			t.Errorf("Pack of the %d byte wallet = %d bytes, %v, want %d", tc.text, len(p), err, tc.packed)
+		}
 	}
 }
 

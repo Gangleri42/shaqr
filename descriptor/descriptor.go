@@ -2,7 +2,7 @@
 
 // Package descriptor has the little that a descriptor backup
 // (DESCRIPTOR.md) needs to know about output descriptors: the BIP 380
-// checksum, the canonical form of the payload and the quorum of a
+// checksum, the canonical form, the packed payload and the quorum of a
 // multisig.
 //
 // It scans a descriptor into calls, tap trees and the leaf arguments
@@ -97,9 +97,9 @@ func Checksum(desc string) (string, error) {
 	return string(sum[:]), nil
 }
 
-// Verify requires desc to end in "#" and its right checksum, as a
-// recovered descriptor payload must (DESCRIPTOR.md Recovery). It trims
-// nothing, since that text goes to wallet software byte for byte.
+// Verify requires desc to end in "#" and its right checksum, as the
+// text that Pack takes must. It trims nothing, since a recovered text
+// goes to wallet software byte for byte.
 func Verify(desc string) error {
 	i := strings.LastIndexByte(desc, '#')
 	if i < 0 {
@@ -116,13 +116,14 @@ func Verify(desc string) error {
 }
 
 // Canonical returns the canonical form of a descriptor with its
-// checksum, the payload of a descriptor backup (DESCRIPTOR.md Payload).
-// It deletes white space, verifies a checksum that is present, writes
-// hardened steps as h and origin fingerprints in lower case, writes the
-// children of every extended key as /<0;1>/* when they are absent, /0/*
+// checksum (DESCRIPTOR.md Canonical form), the text that Pack turns into
+// the payload of a descriptor backup. It deletes white space, verifies a
+// checksum that is present, writes hardened steps as h, and origin
+// fingerprints and hex keys in lower case, writes the children of every
+// extended key outside a musig() as /<0;1>/* when they are absent, /0/*
 // or /<0;1>/*, sorts the keys of every sortedmulti and sortedmulti_a,
 // and computes the checksum afresh. Two exports of one wallet then give
-// one payload, and so one derived set.
+// one text, and so one payload and one set.
 func Canonical(desc string) (string, error) {
 	desc = deleteSpace(desc)
 	if i := strings.LastIndexByte(desc, '#'); i >= 0 {
@@ -138,7 +139,7 @@ func Canonical(desc string) (string, error) {
 	if e.name == "" || e.name == "{" {
 		return "", errors.New("descriptor: not a script expression")
 	}
-	e.canonicalize()
+	e.canonicalize(false)
 	desc = e.String()
 	sum, err := Checksum(desc)
 	if err != nil {
@@ -396,15 +397,17 @@ func isKey(call string, a expr) bool {
 	return a.name == "" && strings.Trim(a.text, "0123456789") != "" && !notKeys[fragment(call)]
 }
 
-// canonicalize applies rules 1 to 3 of DESCRIPTOR.md Payload to the
-// arguments of e and everything inside them.
-func (e *expr) canonicalize() {
+// canonicalize applies rules 1 to 3 of DESCRIPTOR.md Canonical form to
+// the arguments of e and everything inside them. musig is whether e is
+// inside a musig().
+func (e *expr) canonicalize(musig bool) {
+	musig = musig || fragment(e.name) == "musig"
 	for i := range e.args {
 		a := &e.args[i]
 		if isKey(e.name, *a) {
-			a.text = canonicalKey(a.text)
+			a.text = canonicalKey(a.text, musig)
 		} else {
-			a.canonicalize()
+			a.canonicalize(musig)
 		}
 	}
 	if sorted[fragment(e.name)] {
@@ -416,15 +419,20 @@ func (e *expr) canonicalize() {
 // for a wallet's receive and change branches.
 var receiveChange = map[string]bool{"": true, "/0/*": true, "/<0;1>/*": true}
 
-// canonicalKey applies rules 1 and 2 to a key expression. A ' marks
-// only a hardened step in BIP 380, so it becomes h wherever it stands.
-func canonicalKey(key string) string {
+// canonicalKey applies rules 1 and 2 to a key expression, and only rule
+// 1 when musig is set: a key inside a musig() keeps its children. A '
+// marks only a hardened step in BIP 380, so it becomes h wherever it
+// stands.
+func canonicalKey(key string, musig bool) string {
 	origin, k, children := keyParts(strings.ReplaceAll(key, "'", "h"))
 	if fp := originFingerprint(origin); fp != "" {
 		origin = "[" + lowerASCII(fp) + origin[1+len(fp):]
 	}
-	if extended(k) && receiveChange[children] {
-		children = "/<0;1>/*"
+	if (len(k) == 64 || len(k) == 66) && strings.Trim(k, "0123456789abcdefABCDEF") == "" {
+		k = lowerASCII(k)
+	}
+	if extended(k) && receiveChange[children] && !musig {
+		children = multipath
 	}
 	return origin + k + children
 }
@@ -463,8 +471,8 @@ func originFingerprint(origin string) string {
 
 // extended reports whether key is a BIP 32 extended key, which BIP 380
 // writes with the prefixes xpub and xprv, or tpub and tprv on the test
-// networks. SLIP 132 prefixes such as zpub are not valid in a descriptor
-// and are left as given, like hex keys and WIF keys.
+// networks. SLIP 132 prefixes such as zpub are not valid in a descriptor,
+// and their children stay as given, like those of hex keys and WIF keys.
 func extended(key string) bool {
 	for _, p := range []string{"xpub", "xprv", "tpub", "tprv"} {
 		if strings.HasPrefix(key, p) {

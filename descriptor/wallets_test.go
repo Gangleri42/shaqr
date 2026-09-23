@@ -1,0 +1,70 @@
+// SPDX-License-Identifier: CC0-1.0
+
+package descriptor
+
+import "strings"
+
+// The keys of wallets built from keys derived from seeds, as wallets
+// export them: each a key origin and an xpub whose depth and child number
+// agree with it, one per line, without children, in the order of the
+// canonical form. The keys of the 2-of-3 are those of the descriptor of
+// the derived-set vector in testdata/vectors.json.
+const (
+	twoOfThreeKeys = `[28645006/48h/0h/0h/2h]xpub6DnEBNkSJKBYQmsbhS1sP9cNdtU5c9PLFGCjTJmxicxc13WB8zNNGQazabQpyFAGW5bV9tMko4uBxDxjUKL6dSAcx1tEbgEHtgSqyRsekh6
+[73c5da0a/48h/0h/0h/2h]xpub6DkFAXWQ2dHxq2vatrt9qyA3bXYU4ToWQwCHbf5XB2mSTexcHZCeKS1VZYcPoBd5X8yVcbXFHJR9R8UCVpt82VX1VhR28mCyxUFL4r6KFrf
+[b8688df1/48h/0h/0h/2h]xpub6FQya7zGhR92kacYsNnjreouvnHJMpXYsUXnW6NJJAJRCKsa26TzDy4LdnGhEurr3d6y1J8PJ7EEMKQp74XTqYvmGJNogYXSKDszYHtF8mX`
+
+	sparrowKeys = `[038beeb6/48h/0h/0h/2h]xpub6EttoK6R4jFUu71Xfm5kPUFZC3xvjYv8fzFHnonFyv8NNVp6rng3Xbcqf7HR2HYy2V9aaQqWFjxC2UCZzjcCHDMqGZKVwt4MvfjSUVyUsbU
+[78464bb3/87h/0h/0h]xpub6CvZoNJ5gZf993HokTgydvuyfk4rRePpE12GgmgAn1EwiosyuqZrwZiAPDodBZCKZPodGh2GT51uxUpqcNygs8Uq1buLqBY29YEsscsWLeN
+[ed80f2f9/48h/0h/7h/2h]xpub6EMx2ptz1QykGh1VNwbfevT3iFJkxqiaQU5jyBDWUNkBgNoxp1RpnTD5799XFowRvKUJfSAsrFbfY7vsbyuwAFxyNM3No5BtZdiue8EoPW1`
+
+	tapInternalKey = "[c775c2d9/86h/0h/0h]xpub6C7ZN4P5NZwTeYWp1D9gCd4spSPLxfFiwwmJ4yTJyxcVA5aewhFJTsBfmrSj65KyuCgcZ6YQ3Egj6HTu8TiuxDtdboEfH16sUKik5LJFJA4"
+
+	tapKeys = `[836d4ce8/48h/0h/0h/3h]xpub6E6dqEHNbn8BAxdSzR99fq3MmtzGAUgsUUyqQH4nXs2u8rLsyQEXcb7CzkcbrFQZ5KQNvDZmBygwERNESadYxDbaf98yfv1e46Vxgwh1uHM
+[c0ebd616/48h/0h/0h/3h]xpub6Dd3arpB2mDgn3hXJRZ6heAbcmarM67PEntt1DuJQY2nA5nX3oxA7moFbndvVUbPLTKMUN1R6fKQfPrEckQVDb7sDfDps9wwL79833u9bjH
+[df0f89cf/48h/0h/0h/3h]xpub6EqGqntddaJqfwndqZHYpRJ4LhAKUoiRvHZEKp55VHr4LgT2yBgcs2gjGLEW2nsW7dCe34Agj6jyvcVtcqpeCovSxUU7G2gUcnNZDPk2udX`
+
+	lianaKeys = `[4f7ff35d/48h/0h/0h/2h]xpub6FPbiDjdGFfWS4S49TXPkY9ZXYJTeV5SCniE31GaueKosykBBdUiiWpsqSwdDZxo2HMwhRQHQeW2sF7qeCs5CDDek7ze1PL13nq5iVPg5yy
+[32d5197f/48h/0h/0h/2h]xpub6FLhNThj3LfxUz7VVWYttDNXjxXzCQBwvkpTuZUNsi3Wrk6KRtkPaEHvF61XbtHii6j29oQvRTdjbgVNMLpyaQmVp9HsebdGwdV4rbD7N8E
+[f8c05738/48h/0h/0h/2h]xpub6ENTfwosNEiYmUcXhBzbxrcFppTbtWMLG7DraPMQTLRhTZ7Y4Mt4cbRmRNrbxfxXNTPyx92uYQVDXTmjfRgZQCMRh9yZ9Ju4frWhtqEyJrs`
+
+	fiveKeys = `[759b1073/48h/0h/0h/2h]xpub6ECC8DopPsi43ovwsteKfSUPbUZEZuknv2AwP54DqmFzUxUjNMyvkCzbSxN6XnFo9DEkWdqpSy87oF6nH6tiWcLmq1B7cMiUuUeQB5w7Tmi
+[a9394e65/48h/0h/0h/2h]xpub6EwPeoVByhLBu5Zd45gkzU9HmNyrC3EYkxsS1xoBDd115MWfJ7EfDS7EwjSVF2iZ7ZSJemRrToAipmp9XbW8d42bSET8Pq9V8Hh37FVC9AZ
+[ae088dba/48h/0h/0h/2h]xpub6FH2AWEZgkQL8uN1UFkcimcGqFsrivLjt2ouwak9P1aBBpRwZqoqifN9YvChBEQCkKsiuqD252yQs2Y3Y4PtfjgeK5E2cBRyy8Jy9uEcfnp
+[dfd3ff9b/48h/0h/0h/2h]xpub6F8wrnn9eAgauZEG7bZoQips14Jrk6wcHGrcWsK5Lo2vaPdiryZrKH7pzkajZwb3gXuvztqNBRwwcDUR4WiLjMaabJWwMM7mAFMnSbyn9ps
+[ec68d459/48h/0h/0h/2h]xpub6E8ep22nvtyeoRSNRyB8D6iL2Hic86F5BA1FLwiiHXRxubT9C6qSPUD5k659ASXpAMcaiBBgZziNPCFmBaofqGsvWhyy3szgLLAZW94UdVm`
+
+	twentyKeys = `[0be07858/48h/0h/0h/2h]xpub6ER2aAjhh6ZR1qM5Rhu4eXJvF6kfs5NpuEW9kHLatxvNaFgpXKaq5grVuCSkw3QVSJ4GvzitAbqqVvQ37sQamCGCFqt31enCoFPJ9YBLfo6
+[1a5aa0ca/48h/0h/0h/2h]xpub6F4N8Rkg36YVt1kaymGNHSdVUfFR7GbNHGna8nopXZDrEjZ6WXWiKzg4VPWgZhngns7Jwh1xNF2EJvKTdPLJRKSyv4gF4F32p76pz98fJvN
+[2100c4af/48h/0h/0h/2h]xpub6EQgLPfTuYBhEdJ1vtqkRc6Rtr3KBg4hZ2rUtWgkrAcLiCKYFhtJ9riWDHv2spie7nZpp1Ggre9zfnMSjKyqZAyLDferfc6Eg1fRE6Yw4sL
+[21d2ab13/48h/0h/0h/2h]xpub6EEJvuUgC4CdQhMzJjDYjxCiRkuAPmYDrkQ2TkmYAiCqfMdMJGa2yLKZvkpjAqW43t8yckwT7ny2YnzEiMuTtBwdkJsuF3jpEmbwNYBUWL3
+[224d1a90/48h/0h/0h/2h]xpub6FGv4Y34Ke8HKgLr1tgmx2CQGskFreEweQqAXeHP8ZcuqBDrbB5TJ9uwbgJLoUhNPj1GZ4ezA6dd9PDVmZVYeV722vEKudyvFFfmGhmoFr3
+[4002210e/48h/0h/0h/2h]xpub6EfTbPd4DchpApksdxZFm9WG5UXxUYR79c5s1Gg7XoxPRfcTwGP6YjjZG8uwW6gZiYBNPiqVztqhbvqBo5mXUApeKMFUYDLS95hBxjpirKq
+[5aaa1238/48h/0h/0h/2h]xpub6EJUiU8JtKDP1k9GfJwYX9CQE7cNu91pC49TabW499petk21suBZMeaGgiUcHtn3QP2DE9XhCpYiHxE7jhf9wis5dr8tz5GBAbmxokXu2BU
+[5b363ff4/48h/0h/0h/2h]xpub6Ddrv7SHjehDYGg1JbFZvsL2d8AT3WzoJoNywZ1YfnL2H2jdMUjcEfisRPMJexw2ygd2wRLjNdhD1viK9wsXW8KNGWLNFfg2xn2yXimHGUN
+[77ed0b7f/48h/0h/0h/2h]xpub6DYmhNFJtd9yQXAw1qU2JLhPN3Anv8CSEmrnfjstxHQNU92ovLokjjpLhspmNcByRPN5QdJ1vnavZuzYx9LYSjZ65m1QVbk263fvajC7L49
+[7dc34ae2/48h/0h/0h/2h]xpub6EbnH2izKEs2V5RJkDTsfkLYfP8FFsBg2C7Gac9dxoGQaNFbDpDvBF8rcfMGUombrQ7GB2MTBeaz56tkYnaNQpD86y2aYUDDxNs2zQPPJva
+[90f29d34/48h/0h/0h/2h]xpub6ERDRqoMxR3SKDWfhxfgDieMG6FVZjifSrowwL37xJ3jiX4bXLL2MNoSrqu8hhAPzmEHYG7qZGQaxZkoj87gs6A9YEin1GJKo21LZy6F8pz
+[954981e4/48h/0h/0h/2h]xpub6FC8U6o4DPyCC8x1hMRHN8J65nEPLnKveT5YKQ1BxjPfu1oJn1QqmmKUhN9ANvj3nddcruqR5W3PC94BNVVq7pEZSgkTPz4zJsdwrgromeV
+[9f4e5ad3/48h/0h/0h/2h]xpub6F5Q6c4CSJzgLMvksVpvcp4DTRHiswgj4H7sfVWNAjCyY7X6gaiRpeKwoM77uevkMdK5cx4C9LrZNqjAT1KbkmJ6cMiQcQ8BPT1F8HKBqLj
+[a23500fe/48h/0h/0h/2h]xpub6E9ayt18kVqaqoiKcQSMADYDFvtoURpeYaSQ4BdBKevR3mV4FK844QTnjDgosK2x7mgkPXB53Hb1rFW84N7RxwxnpseN5wFWnYL1oqmYSuK
+[a617af97/48h/0h/0h/2h]xpub6EZJcnjcVEwuNrwZgdWa5vUc3hBC2h2W2FhFGMVcyeCHA4hjgTv89rqq73zuNCUpRNWKyve3VwdeXb7pppoCv1jbjSgC1rMhgj6kNKaS5Aa
+[a77b2948/48h/0h/0h/2h]xpub6EJMx7uAmUQ4RPxMFZHk8Z13dkcQLxM8PeXqx8t7BF2JkRWNHgL42vjwBJntFD7JjLfXEqoZUrd1asdumWmo7FEBD82F7SiiNicouLvV1Ze
+[be91b56d/48h/0h/0h/2h]xpub6EMVG8rvMePVk1rUAqe5N2cRC4qFnCGoyRZkJ8UYVZKmCvq4vQSkBKMRiLEzgUXVp3X9rbxhjjpRQSVthVJ7ZNUccHneB7kkwQuXJSoUiSw
+[d0987761/48h/0h/0h/2h]xpub6EyYLyTwzzZzgjUoLMRZfCtvkeEf3b3wHN9hUo5UQfFiJJCYQ4x15uQREWfjS7XVXWhaAj5tUyWKZViB9YR8wjr8WXbHqG9T8FWBtLk2Kyk
+[d6a70236/48h/0h/0h/2h]xpub6Et2vdSSJxxeJUs5E7BocBmTbya7QuTCuQ4JNA1bnQdGJwuFaieH9yvXEvr8pX7Ab3nWYzzB7LRrStEYMN7bWPkMDM1WrzajgYcLa59YVHr
+[fbe17140/48h/0h/0h/2h]xpub6E9YMAx4681tnGT8sDtiChjEgPsCzAjfPkBPcu7dGJt9E7Q1PVg9oXUD9vhYjQkXZL6txQ7ug9wYk2Y2K3WrEtEvekt7oNK6fTt8fHiPZDH`
+)
+
+// The wallets of DESCRIPTOR.md Sizes, 457, 743 and 2889 bytes.
+var (
+	sizes2of3   = withSum("wsh(sortedmulti(2," + keyList(twoOfThreeKeys, multipath) + "))")
+	sizes3of5   = withSum("wsh(sortedmulti(3," + keyList(fiveKeys, multipath) + "))")
+	sizes10of20 = withSum("wsh(sortedmulti(10," + keyList(twentyKeys, multipath) + "))")
+)
+
+// keyList joins the keys of one of the constants above, each with the
+// children given.
+func keyList(keys, children string) string {
+	return strings.Join(strings.Fields(keys), children+",") + children
+}
