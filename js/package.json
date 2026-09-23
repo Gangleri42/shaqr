@@ -2,7 +2,7 @@
   "name": "shaqr",
   "version": "0.0.0",
   "private": true,
-  "description": "shaQR, short secret shares: the JavaScript implementation of SPEC.md Draft 3",
+  "description": "shaQR, short secret shares: the JavaScript implementation of SPEC.md Draft 4",
   "license": "CC0-1.0",
   "type": "module",
   "exports": {
