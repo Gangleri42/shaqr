@@ -1,17 +1,13 @@
 # shaQR: short secret shares
 
-Draft 3, 23 September 2026. Nothing here has been reviewed. Do not use it with
+Draft 4, 24 September 2026. Nothing here has been reviewed. Do not use it with
 real secrets yet. The code and test vectors in this repository implement
 this draft.
 
-Changes from Draft 2: ChaCha20 replaces the HMAC keystream and the key is 32
-bytes. The id commits to the whole key polynomial. The open format and pieces
-are gone. Every generator draws its key through the seed and checks its set
-before it hands out a share. Receivers have rules for white space, text that
-does not decode, and two shares with one x. A set has a tag, written after a
-`#`, and a label beside a share starts outside base32. Descriptor backups
-moved to DESCRIPTOR.md, where they use derived sets over a canonical
-descriptor.
+Changes from Draft 3: an open set leaves the encryption out, for data that must
+survive lost plates and need not stay private; byte 0 is the format, sealed or
+open. Content type D is a packed descriptor, which DESCRIPTOR.md defines and
+which makes descriptor shares about 40 percent smaller.
 
 License: CC0-1.0. The text of this specification, the profile and notes that
 go with it, the code and the test vectors are dedicated to the public domain.
@@ -19,21 +15,26 @@ See LICENSE.
 
 ## Summary
 
-shaQR splits a secret into n shares. Any k of them recover it. Fewer than k
-show how long the secret is, to within k bytes. Beyond that they reveal
-nothing, except in a derived set (see Generator options), where they let anyone
-confirm a guess at the secret. A share is 55 bytes plus about 1/k of the
-secret.
+shaQR splits a secret into n shares, any k of which recover it. A share is a
+Shamir share of a key together with a parity part of the secret: the secret is
+encrypted under a fresh key, the ciphertext is cut into k parts and extended to
+n with a Reed-Solomon code, and the key is split with Shamir's scheme. A share
+is 55 bytes plus about 1/k of the secret, where a plain Shamir share is as long
+as the secret. Fewer than k shares of a sealed set show how long the secret is,
+to within k bytes, and nothing more, except in a derived set (see Generator
+options), where they let anyone confirm a guess at the secret.
+
+An open set leaves the encryption out. Its shares are the parity parts alone,
+32 bytes shorter, and every share shows part of the secret. It is for data
+that must survive lost plates and need not stay private.
 
 The format is for backups that have to last, on engraved steel or on paper.
 The secret is opaque bytes. A wallet descriptor, a password, a TOTP seed and a
 text note all take the same path.
 
-The construction is Krawczyk's "Secret Sharing Made Short" (CRYPTO '93).
-Encrypt the secret under a one-time key. Spread the ciphertext over the shares
-with an erasure code, so that each share holds 1/k of it. Split the key with
-Shamir's scheme, which is cheap because the key is 32 bytes. Each share carries
-one piece of ciphertext and one piece of key.
+The construction is Krawczyk's "Secret Sharing Made Short" (CRYPTO '93). The
+key is 32 bytes, so its Shamir shares are short, and the parity parts carry
+the bulk of the secret at 1/k each.
 
 A share is one string of text and needs no outer framing. The arithmetic is a
 single interpolation routine over GF(2^8). The cryptography is SHA-256,
@@ -114,7 +115,9 @@ holds 2^38 bytes, which bounds L.
 Inputs are the payload, a content type T of one byte, the threshold k, the
 share count n with 2 <= k <= n <= 255, and r: 32 bytes from a cryptographic
 random source for a session set, or empty for a derived set (see Generator
-options). The payload may be empty.
+options). The payload may be empty. A set is sealed, or open (see Generator
+options). An open set skips steps 2 and 3: it has no r and no key, take is
+empty, and C is sealed itself.
 
 1. Seal the payload.
 
@@ -155,10 +158,11 @@ options). The payload may be empty.
 4. Compute the set id.
 
    ```
-   id = SHA-256("shaQR v1 id" ‖ byte(version) ‖ byte(k) ‖ take ‖ C)[0:16]
+   id = SHA-256("shaQR v1 id" ‖ byte(format) ‖ byte(k) ‖ take ‖ C)[0:16]
    ```
 
-   version is `0x01`, the first byte of every share (see Share layout). take
+   format is the first byte of every share: `0x01` for a sealed set, `0x02`
+   for an open one (see Share layout). take
    is S followed by the R_i, the key polynomial at 0 .. k-1, so the id commits
    to the whole key polynomial and not only to S.
 
@@ -171,7 +175,7 @@ options). The payload may be empty.
    ```
 
    For x below k, key_x is R_x. For x up to k, data_x is C_x. Only the shares
-   past those need any arithmetic.
+   past those need any arithmetic. An open share has no key_x.
 
 6. Check the set before any share leaves the generator. Read every share back
    from its text, recover the payload from the k shares with the highest x and
@@ -184,30 +188,31 @@ The key part is Shamir's scheme. Picking k-1 share values at random and
 interpolating the rest gives the same distribution as picking k-1 random
 coefficients. SLIP-39 works in a similar way: it draws some shares at random
 and interpolates the others. The data part is a systematic Reed-Solomon
-erasure code, which is safe to leave systematic because it only ever sees
-ciphertext.
+erasure code, which is safe to leave systematic because in a sealed set it
+only ever sees ciphertext. In an open set it sees the payload itself, and the
+first k shares hold slices of it in the clear.
 
 ## Share layout
 
 ```
 offset   size   field
-0        1      version   0x01
+0        1      format    0x01 sealed, 0x02 open
 1        1      k         threshold
 2        1      x         index of this share, 1 .. 255
 3        16     id        the same on every share of a set
-19       32     key_x
-51       B      data_x
-51+B     4      check     SHA-256("shaQR v1 check" ‖ all bytes before)[0:4]
+19       32     key_x     sealed shares only
+f        B      data_x    f = 51 sealed, 19 open
+f+B      4      check     SHA-256("shaQR v1 check" ‖ all bytes before)[0:4]
 ```
 
-All shares of a set have the same length, at least 56 bytes. n is not
-recorded because recovery does not need it. x = 0 is where S sits, so a set
-has at most 255 shares.
+All shares of a set have the same length, at least 56 bytes sealed and 24
+open. n is not recorded because recovery does not need it. x = 0 belongs to
+the key, so a set has at most 255 shares.
 
 Tools that label shares or name a set use its tag: the first two bytes of the
 id, written as four upper-case hex digits after a `#`, as in `#B962`.
 
-Later versions of the format keep byte 0 as the version and the last four
+Later versions of the format keep byte 0 as the format byte and the last four
 bytes as check, computed the same way with the string "shaQR v1 check".
 
 ## Checks
@@ -270,10 +275,11 @@ be handed shares of more than one set.
 
 1. Decode each share and verify check. Drop the share if it does not decode
    or check does not match; a share too short to hold a check fails it.
-   Report a share whose check matches and whose version is not `0x01` as made
-   by another version, and leave it out. Then drop, and report, a share
-   shorter than 56 bytes, with x = 0, or with k below 2.
-2. Group shares by k, id and length. Shares in different groups belong
+   Report a share whose check matches and whose format is neither `0x01` nor
+   `0x02` as made by another version, and leave it out. Then drop, and
+   report, a sealed share shorter than 56 bytes or an open one shorter than
+   24, a share with x = 0, and a share with k below 2.
+2. Group shares by format, k, id and length. Shares in different groups belong
    to different sets and are never combined. A group short of k is reported,
    for example as "1 of 2 shares", and does not hold up the others.
 3. Wait for k distinct x values in one group. If two or more shares in a
@@ -291,12 +297,13 @@ be handed shares of more than one set.
    ```
 
    A held share with x = i supplies C_i directly, and R_i too when i is below
-   k.
+   k. In an open set take is empty and only C is interpolated.
 
 5. Recompute id from take and C. If it differs from the id on the shares, output
    nothing. With spare shares the receiver may look for a subset that passes
    (see Finding a bad share).
-6. Decrypt as in step 3 of splitting. Strip trailing zero bytes, then one
+6. In a sealed set, decrypt as in step 3 of splitting; C of an open set is
+   sealed as it stands. Strip trailing zero bytes, then one
    `0x80`. If the `0x80` is missing, or no byte is left before it, stop with
    an error. The first byte of what remains is T and the rest is the
    payload.
@@ -332,14 +339,15 @@ m in polynomial time with Berlekamp-Welch decoding. DECODING.md describes it.
 ## Replacing a lost share
 
 Any k shares of a set can produce any other share of it. Verify the set first.
-Then interpolate the key and data parts at the new x, copy version, k and id,
+Then interpolate the key and data parts at the new x, copy format, k and id,
 and compute check. This is how a lost share is made again and how n is raised
 later. The device doing it holds k shares and could recover the payload, so
 treat the occasion like a recovery.
 
 ## Generator options
 
-A share does not record which of these the generator used.
+A share records whether its set is sealed or open. It does not record
+whether a sealed set is a session or a derived set, or whether it was padded.
 
 ### Session sets and derived sets
 
@@ -363,27 +371,38 @@ password that is worth hiding. A generator may accept a minimum length for
 sealed and add zero bytes until it is reached, keeping L a multiple of k.
 Recovery strips them without being told. A derived set gets only the zero
 bytes that sealing (Splitting, step 1) requires, so that it stays a function
-of T, the payload and k.
+of T, the payload and k. An open set shows its payload anyway and takes no
+padding either.
+
+### Open sets
+
+An open set leaves out the encryption: it has no r and no key, take is empty
+and C is sealed itself, so its shares carry no key part and are 32 bytes
+shorter. The first k shares hold slices of the payload in the clear and the
+others hold mixes of it, so every share shows part of the payload. An open
+set is for data that must survive lost plates and need not stay private. Like
+a derived set it is a function of T, the payload and k, and a lost share can
+be made again from the payload alone.
 
 ## Content types
 
 ```
 0x42  B    bytes
 0x55  U    UTF-8 text, not normalized
-0x44  D    output descriptor, BIP 380 text with its checksum (DESCRIPTOR.md)
+0x44  D    output descriptor, packed as DESCRIPTOR.md describes
 ```
 
-Other values are reserved. T sits inside the encryption, so a share does not
-show what kind of secret it protects. The core interprets no type: a payload
-with a checksum of its own, such as a descriptor, keeps it, and the
-application verifies it. A receiver that meets a type it does not know hands
-the type and the bytes to its caller.
+Other values are reserved. In a sealed set T sits inside the encryption, so a
+share does not show what kind of secret it protects. The core interprets no
+type; the application reads its payload, as DESCRIPTOR.md does for D. A
+receiver that meets a type it does not know hands the type and the bytes to its
+caller.
 
 ## Security
 
-Someone with fewer than k shares of a set sees version, k, id, some x values
-and L. From those they learn that the shares belong together, the threshold, a
-lower bound on n and the length of the payload to within k bytes.
+Someone with fewer than k shares of a sealed set sees format, k, id, some x
+values and L. From those they learn that the shares belong together, the
+threshold, a lower bound on n and the length of the payload to within k bytes.
 
 In a session set that is all. r is uniform, so seed, S and the R_i are
 pseudorandom. The key parts are then Shamir shares below the threshold and
@@ -399,6 +418,10 @@ guess at the payload by running the splitting steps once, and anyone who
 already knows the payload can recognise its shares. A session set allows
 neither.
 
+An open set hides nothing: every share shows part of the payload. The id still
+verifies the result and stops a forged share, since it commits to C, which
+here is the sealed payload.
+
 S is 32 bytes, so Grover's algorithm needs about 2^128 steps to find it, and a
 share of a session set taken today stays closed to a quantum computer later. A
 derived set is only as strong as its payload is hard to guess, and Grover
@@ -410,7 +433,7 @@ A holder, or any group of holders short of k, who has learned the secret, for
 instance by being present at an earlier recovery, knows S and C, and can
 compute a replacement share that changes what a later recovery outputs. Bare
 Shamir allows this and so does Krawczyk's basic scheme. Here every honest share
-carries the id the generator computed, a commitment to version, k, C and the
+carries the id the generator computed, a commitment to format, k, C and the
 whole key polynomial, whose opening is take. The forger cannot alter the honest
 copies. To pass step 5 of Recovering the forger needs a second take and C with
 the same id, a second preimage of a 16 byte hash: about 2^128 work, 2^64 for a
@@ -430,26 +453,29 @@ and deserves the same care as the generator.
 ## Sizes
 
 ```
-share bytes = 55 + B          B = ceil((payload + 2) / k)
+share bytes = 55 + B sealed, 23 + B open       B = ceil((payload + 2) / k)
 text chars  = 6 + ceil(8 * share bytes / 5)
 ```
 
+Share bytes, text characters and QR version for a sealed and an open set.
 QR versions are for alphanumeric mode at error level L. For comparison, the
 last column is a Shamir share of the payload with the same 9 bytes of type,
 terminator, header and check, in the same text form.
 
 ```
-payload                  split      share   text   QR    Shamir QR
-TOTP seed, 20 bytes      2-of-3        66    112    4        3
-key, 32 bytes            2-of-3        72    122    5        3
-key, 32 bytes            3-of-5        67    114    4        3
-descriptor, 457 bytes    2-of-3       285    462   11       15
-descriptor, 743 bytes    3-of-5       304    493   12       20
-descriptor, 2889 bytes   10-of-20     345    558   13     none
+payload                  split      sealed           open             Shamir
+TOTP seed, 20 bytes      2-of-3      66 / 112 / 4     34 /  61 / 3     3
+key, 32 bytes            2-of-3      72 / 122 / 5     40 /  70 / 3     3
+key, 32 bytes            3-of-5      67 / 114 / 4     35 /  62 / 3     3
+descriptor, 457 bytes    2-of-3     285 / 462 / 11   253 / 411 / 11   15
+descriptor, 743 bytes    3-of-5     304 / 493 / 12   272 / 442 / 11   20
+descriptor, 2889 bytes   10-of-20   345 / 558 / 13   313 / 507 / 12   none
 ```
 
-The descriptors are `wsh(sortedmulti(..))` of 3, 5 and 20 keys with key
-origins and `/<0;1>/*` children, checksum included.
+The descriptors are the text of `wsh(sortedmulti(..))` of 3, 5 and 20 keys
+with key origins and `/<0;1>/*` children, checksum included. A descriptor
+backup packs its payload first, which takes the 2-of-3 to QR version 9 and the
+10-of-20 to version 10; DESCRIPTOR.md has those sizes.
 
 ## Worked example
 
