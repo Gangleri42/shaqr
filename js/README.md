@@ -22,8 +22,8 @@ SHA-256 for base58check. A share or set that recovery cannot use throws
 a `ShaqrError`, and a descriptor that `canonical`, `verify`, `pack` or
 `unpack` refuses throws a `DescriptorError`. Each error has a `code`, one
 of the words the vector files use, such as `check`, `too-few`, `id` or
-`not-packed`. The comments in shaqr.js and descriptor.js say what every
-function does.
+`not-packed`; testdata/README.md lists them. The comments in shaqr.js
+and descriptor.js say what every function does.
 
 `split(payload, type, k, n, options)` takes the options `open`,
 `derived`, `minLen` and `r`. `{ open: true }` cuts an open set: no key and
@@ -98,11 +98,12 @@ const text = await unpack(payload); // the canonical text with its checksum
 `askUser` stands for whatever the page does to ask for k and n. `unpack`
 throws a `DescriptorError` with the code `not-packed` when the payload
 unpacks to a descriptor that packs to other bytes, and `invalid` when it
-does not unpack at all. The message of an invalid error can quote a
-character or a byte of the payload, so a page reports the code instead.
-An open set shows part of the descriptor on every plate, so a descriptor
-that holds a private key is never cut open; descriptor.js leaves that
-check to the caller.
+does not unpack at all or its text grows longer than eight times its bytes
+plus 64, a text that `pack` refuses too. The message of an invalid error
+can quote a character or a byte of the payload, so a page reports the code
+instead. An open set shows part of the descriptor on every plate, so a
+descriptor that holds a private key is never cut open; descriptor.js
+leaves that check to the caller.
 
 Browsers give WebCrypto only to secure contexts, so the page has to come
 over HTTPS or from localhost, and they do not load modules from file://

@@ -29,6 +29,7 @@ js/                        a second implementation, in JavaScript
 testdata/vectors.json      test vectors, valid and invalid
 testdata/descriptors.json  canonical and packed forms and quorums of
                            descriptors
+testdata/README.md         the fields of both files and the words they use
 py/bw_sketch.py            a sketch of the decoder in DECODING.md
 site/                      the demo page, https://shaqr.org/
 .github/workflows/         the tests, and the Pages deploy of site/
@@ -47,12 +48,13 @@ FuzzCombine and FuzzSplitCombine run the same way as FuzzDecode.
 Go writes the vectors. `go test -run TestVectors -update` rewrites
 testdata/vectors.json from the inputs in vectors_test.go, and
 `go test ./descriptor/ -update` rewrites testdata/descriptors.json from
-descriptor/descriptor_test.go. Without -update the Go tests check that both
-files are exactly what the inputs give, rebuild every valid set and compare
-the text of the shares byte for byte. The JS tests read the same
-files and check them, so the two implementations agree. To change the
-format, change the Go code and its inputs, rewrite the files and make the
-JS tests pass again.
+the inputs in descriptor/descriptor_test.go, pack_test.go and
+wallets_test.go. testdata/README.md describes both files. Without -update
+the Go tests check that both files are exactly what the inputs give,
+rebuild every valid set and compare the text of the shares byte for byte.
+The JS tests read the same files and check them, so the two
+implementations agree. To change the format, change the Go code and its
+inputs, rewrite the files and make the JS tests pass again.
 
 Things the Go package does that SPEC.md leaves open: Combine, given more
 than k shares, searches for k that pass the id. It tries every run of k
@@ -88,9 +90,11 @@ desc, err := descriptor.Unpack(payload) // the canonical text with its checksum
 ```
 
 Unpack packs the text it unpacked once more and returns
-`descriptor.ErrNotPacked` when the bytes differ, so that one wallet has one
-packed form and so one set per format and k. In JavaScript, `pack(desc)`
-and `unpack(packed)` in js/descriptor.js do the same, and
+`descriptor.ErrNotPacked` when the bytes differ, so that one wallet has
+one packed form and so one set per format and k. Pack refuses, and Unpack
+stops at, a text longer than eight times the packed bytes plus 64
+(DESCRIPTOR.md Packed payload). In JavaScript, `pack(desc)` and
+`unpack(packed)` in js/descriptor.js do the same, and
 `split(payload, TypeDescriptor, k, n, { open: true })` cuts an open set;
 js/README.md has an example.
 
@@ -120,28 +124,32 @@ go run ./cmd/descbackup -h
 descbackup follows DESCRIPTOR.md. Split puts the descriptor in canonical
 form, packs it and cuts a derived set of it, so that it cuts the same
 plates from the same wallet every time. With -open it cuts an open set:
-every plate is 32 bytes shorter and shows part of the descriptor, whole
-public keys among it. It refuses to cut an open set of a descriptor that
-holds a private key, an xprv, a tprv or a WIF key. It reads the descriptor
-from standard input, or from its argument, which leaves the keys in the
-shell's history. It takes k and n from a descriptor whose keys all sit in
-one multi and labels share x with its set, the quorum, the format and the
-fingerprint of the x-th key, or the last 8 characters of a key with no
-origin, as in `# share 1 of set #7B63 (2-of-3, sealed), key [28645006]`.
-For any other descriptor give -k and -n. It checks the origin and the path
-of every key, and warns when the descriptor has no checksum, since then
-nothing shows that it is the wallet's. A 1-of-n descriptor makes no set,
-and split prints the descriptor that goes on every plate. Every other line
-it prints that is not a share starts with `#`. Recover reads its input as
-one text, in any case and wrapped over any number of lines. It reports
-every share it leaves out and why, by the line it starts on. Once the id
-and the content type pass and the payload unpacks, it prints the
-descriptor of every set it holds k shares of, with the checksum unpacking
-computes, byte for byte. A payload that fails to unpack, or unpacks to
-text that packs to other bytes, is reported and printed nowhere. Where
-two texts claim one x and too few other x values remain, it tries each,
-and the id decides. Replace makes share x of the one set it holds k shares
-of. Messages name a set by its tag.
+every plate is 32 bytes shorter and shows part of the descriptor; the
+first k plates hold slices of it, whole public keys among them. It refuses
+to cut an open set of a descriptor that holds a private key, an xprv, a
+tprv, a SLIP-132 form such as zprv or a WIF key, or a key whose text
+starts like one. It reads the descriptor from standard input, or from its
+argument, which leaves the keys in the shell's history. It takes k and n
+from a descriptor whose keys all sit in one multi and labels share x with
+its set, the quorum, the format and the fingerprint of the x-th key, or
+the last 8 characters of a key with no origin, as in
+`# share 1 of set #7B63 (2-of-3, sealed), key [28645006]`. For any other
+descriptor give -k and -n. It checks the origin and the path of every key
+and the base58check of every extended key, and warns when the descriptor
+has no checksum, since then nothing shows that it is the wallet's. A
+1-of-n descriptor makes no set, and split prints the descriptor that goes
+on every plate. Every other line it prints that is not a share starts with
+`#`. Recover reads its input as one text, in any case and wrapped over any
+number of lines. It reports every share it leaves out and why, by the line
+it starts on. Once the id and the content type pass and the payload
+unpacks, it prints the descriptor of every set it holds k shares of, with
+the checksum unpacking computes, byte for byte. It warns when that text is
+not a descriptor in canonical form, which no tool that follows
+DESCRIPTOR.md cuts, and prints it all the same. A payload that fails to
+unpack, or unpacks to text that packs to other bytes, is reported and
+printed nowhere. Where two texts claim one x and too few other x values
+remain, it tries each, and the id decides. Replace makes share x of the
+one set it holds k shares of. Messages name a set by its tag.
 
 ## Site
 
