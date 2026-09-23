@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#faf8f5" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#131110" media="(prefers-color-scheme: dark)" />
+    <meta
+      name="description"
+      content="A 3-of-5 multisig survives the loss of two seeds. It does not survive the loss of one xpub. shaQR puts a short share of the descriptor on every signer's plate, and any signing quorum rebuilds it."
+    />
+    <title>shaQR: lose some plates, keep the wallet</title>
+    <link rel="icon" type="image/svg+xml" href="icon.svg" />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+
+  <body>
+    <header class="brand">
+      <img src="icon.svg" alt="" width="22" height="22" />
+      <span>shaQR <em>short secret shares</em></span>
+    </header>
+
+    <section class="hero">
+      <h1>Lose some plates.<br />Keep the wallet.</h1>
+      <p>
+        shaQR puts one short share of the multisig descriptor on every signer's plate, beside
+        the seed, and <strong>any k of n plates</strong> bring it back.
+      </p>
+    </section>
+
+    <nav class="tabs" role="tablist" aria-label="Sections">
+      <button class="tab" id="tabbtn-split" role="tab" aria-selected="true" aria-controls="tab-split">
+        <b>1</b> Split
+      </button>
+      <button class="tab" id="tabbtn-recover" role="tab" aria-selected="false" aria-controls="tab-recover">
+        <b>2</b> Recover
+      </button>
+      <button class="tab" id="tabbtn-about" role="tab" aria-selected="false" aria-controls="tab-about">
+        <b>3</b> Why
+      </button>
+    </nav>
+
+    <main>
+      <section id="tab-split" role="tabpanel" aria-label="Split a secret">
+        <div class="card">
+          <label class="field-label" for="desc-input">Descriptor or secret</label>
+          <textarea id="desc-input" rows="5" spellcheck="false" autocapitalize="off"
+            placeholder="Paste a multisig descriptor, or any other text. It splits as you type."></textarea>
+          <div class="row">
+            <button id="btn-scan-single" class="btn">
+              <svg class="ic" viewBox="0 0 16 16" aria-hidden="true">
+                <path fill="currentColor" d="M1 1h6v6H1V1zm2 2v2h2V3H3zm6-2h6v6H9V1zm2 2v2h2V3h-2zM1 9h6v6H1V9zm2 2v2h2v-2H3zm10-2h2v2h-2v-2zM9 11h2v2H9v-2zm4 0h2v2h-2v-2zm-2 2h2v2h-2v-2z"/>
+              </svg>
+              Scan QR
+            </button>
+            <span class="ex-pick" role="group" aria-label="Load an example descriptor">
+              <span class="ex-label">or try</span>
+              <button class="btn chip" data-example="2of3">2/3</button>
+              <button class="btn chip" data-example="3of5">3/5</button>
+              <button class="btn chip" data-example="10of20">10/20</button>
+            </span>
+            <button id="btn-clear" class="btn ghost">Clear</button>
+          </div>
+        </div>
+
+        <div class="card ofn-card">
+          <p class="ofn">
+            Any
+            <span class="ofn-n">
+              <button type="button" data-step="-1" data-for="k" aria-label="Fewer needed">−</button>
+              <input id="k" type="number" min="2" max="255" value="2" aria-label="Plates needed" />
+              <button type="button" data-step="1" data-for="k" aria-label="More needed">+</button>
+            </span>
+            of
+            <span class="ofn-n">
+              <button type="button" data-step="-1" data-for="n" aria-label="Fewer plates">−</button>
+              <input id="n" type="number" min="2" max="255" value="3" aria-label="Plates in total" />
+              <button type="button" data-step="1" data-for="n" aria-label="More plates">+</button>
+            </span>
+            plates recover it.
+          </p>
+          <p id="split-status" class="status">Paste a descriptor or any other secret. It splits as you type.</p>
+          <p id="split-note" class="note" hidden></p>
+        </div>
+
+        <div id="parts-grid" class="parts"></div>
+
+        <div class="row center" id="split-actions" hidden>
+          <button id="btn-dl" class="btn ghost">Download PNG</button>
+          <button id="btn-dl-svg" class="btn ghost">Download SVG cards</button>
+        </div>
+      </section>
+
+      <section id="tab-recover" role="tabpanel" aria-label="Recover a secret" hidden>
+        <div class="card rec-head">
+          <div>
+            <h2>Recovery</h2>
+            <p class="muted">
+              Select the plates you still have, scan them, or type their text. Any k plates of
+              one set bring it back.
+            </p>
+          </div>
+          <div class="row">
+            <button id="btn-cam" class="btn">
+              <svg class="ic" viewBox="0 0 16 16" aria-hidden="true">
+                <path fill="currentColor" d="M1 1h6v6H1V1zm2 2v2h2V3H3zm6-2h6v6H9V1zm2 2v2h2V3h-2zM1 9h6v6H1V9zm2 2v2h2v-2H3zm10-2h2v2h-2v-2zM9 11h2v2H9v-2zm4 0h2v2h-2v-2zm-2 2h2v2h-2v-2z"/>
+              </svg>
+              Start camera
+            </button>
+            <button id="btn-all" class="btn ghost">All</button>
+            <button id="btn-none" class="btn ghost">None</button>
+          </div>
+        </div>
+
+        <div class="card paste-card">
+          <details id="paste-box" open>
+            <summary class="field-label">Type or paste share text</summary>
+            <textarea id="paste-input" class="paste" rows="3" spellcheck="false" autocapitalize="off"
+              aria-label="Share text"
+              placeholder="Type or paste shares, as many as you have. Case, spaces and line breaks do not matter. A label line starts with #."></textarea>
+          </details>
+          <div class="row" id="paste-tries" hidden>
+            <span class="ex-pick" role="group" aria-label="Paste a bad plate">
+              <span class="ex-label">or paste</span>
+              <button class="btn chip" data-try="typo">a typo</button>
+              <button class="btn chip" data-try="other">another wallet's plate</button>
+              <button class="btn chip" data-try="forged">a forged plate</button>
+            </span>
+          </div>
+          <ul id="paste-report" class="report" hidden></ul>
+        </div>
+
+        <div class="rec-status-wrap">
+          <div class="meter"><i id="rec-meter"></i></div>
+          <p id="rec-status" class="status">Split something in tab 1, scan plates with the camera, or type their text.</p>
+        </div>
+
+        <div id="rec-grid" class="parts"></div>
+
+        <div id="rec-results"></div>
+      </section>
+
+      <section id="tab-about" role="tabpanel" aria-label="Why shaQR" hidden>
+        <div class="prose">
+          <h2>The descriptor is the backup</h2>
+          <p>
+            A multisig can only be spent through its witness script, and that script contains
+            every cosigner's key. In a 3-of-5, three seeds can sign. They cannot rebuild the
+            script without the other two xpubs.
+          </p>
+          <p>
+            The output descriptor records all five, so it is the one part of the wallet that
+            must survive complete. It holds no private key. It should still be backed up on
+            steel like the seeds.
+          </p>
+
+          <h2>SeedHammer today</h2>
+          <p>
+            SeedHammer II engraves the descriptor on a single plate with a fixed layout. Four
+            cosigners with key origins fit. Five do not.
+          </p>
+          <p>
+            That plate is one more thing to lose. Whoever finds it reads every xpub, and with
+            them every address the wallet will ever use.
+          </p>
+
+          <h2>What shaQR does</h2>
+          <p>
+            shaQR encrypts the secret with ChaCha20 under a one-time 32-byte key. It spreads the
+            ciphertext over the plates with a Reed-Solomon code, so each plate holds 1/k of it,
+            and splits the key with Shamir's scheme. The construction is Hugo Krawczyk's
+            "Secret Sharing Made Short", CRYPTO 1993.
+          </p>
+          <p>
+            Any k plates rebuild the key and the ciphertext, and with them the secret. Fewer
+            plates show only its length, to within k bytes. Derived sets, below, are the one
+            exception. A share is about 1/k of the secret plus 55 bytes.
+          </p>
+          <p>
+            For a descriptor, k and n are the wallet's own, and share x goes on the plate of
+            the x-th key. Whoever holds enough seeds to spend also holds enough plates to
+            recover, so the backup is never weaker than the wallet.
+          </p>
+          <p>
+            Shares shorter than the secret cannot have perfect secrecy, so shaQR's secrecy rests
+            on ChaCha20 and SHA-256. The wallet's own keys rest on assumptions of the same kind.
+          </p>
+
+          <h2>Sizes</h2>
+          <div class="table-wrap">
+            <table class="compare nums">
+              <tr><th>Quorum</th><th>Descriptor, bytes</th><th>Per plate, chars</th><th>QR version</th><th>Shamir share, QR version</th></tr>
+              <tr><td>2-of-3</td><td>457</td><td>462</td><td>11</td><td>15</td></tr>
+              <tr><td>3-of-5</td><td>743</td><td>493</td><td>12</td><td>20</td></tr>
+              <tr><td>10-of-20</td><td>2889</td><td>558</td><td>13</td><td>none</td></tr>
+            </table>
+          </div>
+          <p>
+            The descriptors are <code>wsh(sortedmulti(...))</code> with key origins and
+            <code>/&lt;0;1&gt;/*</code> children. The QR versions are for alphanumeric mode at
+            error level L. The Shamir share carries the same 9 bytes of type, terminator, header
+            and check as a shaQR share.
+          </p>
+          <p>
+            Plates grow slowly with the quorum, because each holds 1/k of the descriptor. Small
+            secrets go the other way. A 20-byte TOTP seed split 2-of-3 makes 66-byte shares,
+            against 29 for a Shamir share. Most of the difference is the 32-byte key part.
+          </p>
+
+          <h2>What every plate carries</h2>
+          <p>
+            <strong>A check.</strong> Four bytes of a SHA-256 hash over the rest of the share. A
+            damaged or mistyped plate fails it the moment it is scanned, while its holder is
+            still there to try again.
+          </p>
+          <p>
+            <strong>A set id.</strong> Sixteen bytes that commit to the key and the ciphertext.
+            Recovery recomputes it and outputs nothing when it differs. Anyone can compute a
+            check, so the check stops no forger. Someone who was present at an earlier recovery
+            knows the key and the ciphertext. Without the id, they could make a plate that
+            changes what a later recovery outputs. A recovery that uses such a plate fails the
+            id, so the plate can stop a recovery and cannot change its result. With a spare
+            plate, the receiver names the forged one.
+          </p>
+          <p>
+            <strong>A tag.</strong> The first two bytes of the id, in hex after a
+            <code>#</code>, as in <code>#2714</code>. It tells sets apart on a shelf and in a
+            scanner. A plate of another wallet lands in a set of its own and spoils nothing.
+          </p>
+          <p>
+            <strong>Derived sets.</strong> A descriptor backup draws its key from the canonical
+            descriptor, so the same wallet always cuts the same plates, in any tool that follows
+            the spec. A lost plate can be cut again from the descriptor alone. A derived set
+            cannot be refreshed: splitting again gives the same plates, so a departed cosigner
+            normally means a new wallet, a new descriptor and a new set. In exchange for the
+            derivation, anyone who already holds every xpub can recognise the plates. They learn
+            nothing new by it. Each xpub carries as many unknown bits as the seed behind it,
+            about 128 for a 12-word seed, so someone missing even one xpub can no more guess the
+            descriptor than guess that seed. Any other secret gets a session set, with a fresh
+            random key each time.
+          </p>
+          <p>
+            <strong>An open spec.</strong> SPEC.md and DESCRIPTOR.md are CC0. There are two
+            implementations, in Go and in JavaScript, and both pass the same test vectors. This
+            page runs the JavaScript one.
+          </p>
+
+          <h2>Compared with the alternatives</h2>
+          <div class="table-wrap">
+            <table class="compare">
+              <tr><th></th><th>Per plate</th><th>Rebuilt from</th><th>One plate shows</th></tr>
+              <tr class="ours"><td>shaQR</td><td>1/k of the secret, plus 55 bytes</td><td>any k of n plates</td><td>its length</td></tr>
+              <tr><td>SLIP-39 Shamir</td><td>the whole secret</td><td>any k of n plates</td><td>nothing</td></tr>
+              <tr><td>BBQr parity</td><td>1/k of the descriptor, plain or compressed</td><td>any k of n plates</td><td>on a data plate, its part in the clear</td></tr>
+              <tr><td>UR fountain</td><td>1/k, plus a header per part</td><td>only some sets of k plates</td><td>pieces of the descriptor</td></tr>
+              <tr><td>BIP-138</td><td>the whole secret, encrypted</td><td>one plate and one xpub</td><td>everything, to anyone with one xpub</td></tr>
+            </table>
+          </div>
+
+          <h3>Shamir shares as long as the secret</h3>
+          <p>
+            SLIP-39 splits a seed this way. Each share is as long as the secret, and in return
+            the secrecy is perfect. For the 3-of-5 descriptor above that is a version 20 code on
+            every plate. The 10-of-20 does not fit one QR code at all.
+          </p>
+
+          <h3>BBQr parity parts</h3>
+          <p>
+            An earlier version of this page proposed them. They cut the descriptor into k data
+            parts and add parity parts, so any k plates rebuild it. In plain mode the data plates
+            keep the descriptor readable. For the 3-of-5 descriptor above, a compressed part is
+            320 characters, a version 9 code, against shaQR's 493 and version 12. A part carries
+            an 8-character header where a shaQR share carries 55 bytes of key, id, check and
+            header, and shaQR compresses nothing. In hex, the mode a pen and a table can read, a
+            part is 532 characters and version 12, the same version as shaQR's.
+          </p>
+          <p>
+            They carry no key, no check and no set id. A data plate holds its part of the
+            descriptor in the clear. Damage to a part shows only after the whole descriptor is
+            rebuilt, and nothing ties the parts of one set to each other.
+          </p>
+
+          <h3>UR fountain codes</h3>
+          <p>
+            On a screen, a fountain code keeps sending parts until the receiver has enough. On
+            steel the set of plates is fixed. A fountain part is an XOR of slices chosen by a
+            pseudo-random mixer, and decoding works only if the parts at hand happen to peel.
+          </p>
+          <p>
+            A fixed set of plates would need parts of which every k decode. XOR mixes of k
+            fragments give only 2<sup>k</sup> − 1 distinct parts, and a set in which every k of
+            them are independent has at most k + 1 members: the k fragments and their XOR. One
+            part per plate therefore gives only n-of-n and (n−1)-of-n. A code in which every k of
+            n parts decode is what Reed-Solomon gives, and it is the code shaQR spreads the
+            ciphertext with.
+          </p>
+
+          <h3>A key derived from the xpubs</h3>
+          <p>
+            BIP-138 encrypts a descriptor under a key derived from its own public keys, so any
+            cosigner opens it with an xpub and no other secret. That keeps the backup simple:
+            one plate, one xpub. It also means anyone who ever held one of the xpubs can open it: a
+            coordinator, a watch-only wallet, a laptop that once imported a key.
+          </p>
+          <p>
+            A shaQR set opens with k plates. For a descriptor backup the key also follows from
+            the whole descriptor, which only someone who already has every xpub could supply.
+            One xpub opens nothing.
+          </p>
+
+          <h2>Links</h2>
+          <ul class="links">
+            <li>
+              <a href="https://github.com/Gangleri42/shaqr/blob/main/SPEC.md" target="_blank" rel="noopener">Spec: shaQR, SPEC.md</a>
+            </li>
+            <li>
+              <a href="https://github.com/Gangleri42/shaqr/blob/main/DESCRIPTOR.md" target="_blank" rel="noopener">Profile: descriptor backups, DESCRIPTOR.md</a>
+            </li>
+            <li>
+              <a href="https://github.com/Gangleri42/shaqr" target="_blank" rel="noopener">Code: Go package and the descbackup tool</a>
+            </li>
+            <li>
+              <a href="https://github.com/Gangleri42/shaqr/tree/main/js" target="_blank" rel="noopener">Code: JavaScript module</a>
+            </li>
+            <li>
+              <a href="https://github.com/Gangleri42/shaqr/tree/main/testdata" target="_blank" rel="noopener">Test vectors</a>
+            </li>
+            <li>
+              <a href="https://link.springer.com/chapter/10.1007/3-540-48329-2_12" target="_blank" rel="noopener">Paper: Krawczyk, Secret Sharing Made Short, CRYPTO 1993</a>
+            </li>
+            <li>
+              <a href="https://github.com/bitcoin/bips/blob/master/bip-0138.md" target="_blank" rel="noopener">BIP-138: Compact Encryption Scheme for Non-seed Wallet Data</a>
+            </li>
+            <li>
+              <a href="https://github.com/Gangleri42/BBQr/blob/erasure-encoding/BBQr.md#parity-parts" target="_blank" rel="noopener">Earlier proposal: BBQr parity parts</a>
+            </li>
+            <li>
+              <a href="https://github.com/seedhammer/seedhammer" target="_blank" rel="noopener">SeedHammer: the original project</a>
+            </li>
+            <li>
+              <a href="https://seedhammer.com" target="_blank" rel="noopener">SeedHammer: steel engraving</a>
+            </li>
+          </ul>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <p class="draft">
+        shaQR is Draft 3 of 23 September 2026. Nobody has reviewed it. Do not use it with real
+        secrets yet.
+      </p>
+      <p>Everything runs in this tab. Nothing is uploaded, nothing is stored.</p>
+    </footer>
+
+    <dialog id="dlg-cam">
+      <div class="cam-view">
+        <video id="cam-video" playsinline muted></video>
+        <div id="cam-frame" aria-hidden="true"></div>
+      </div>
+      <div class="cam-progress" hidden>
+        <div class="steps" id="cam-steps"></div>
+      </div>
+      <div class="row center">
+        <button id="btn-zoom" class="btn ghost" aria-label="Zoom">2×</button>
+        <button id="btn-torch" class="btn ghost" hidden>Torch</button>
+        <button id="btn-cam-stop" class="btn">Stop</button>
+      </div>
+    </dialog>
+
+    <dialog id="dlg-zoom">
+      <canvas id="zoom-canvas"></canvas>
+      <p id="zoom-label"></p>
+      <pre id="zoom-text"></pre>
+      <div class="row center">
+        <button id="btn-zoom-copy" class="btn" autofocus>Copy share text</button>
+        <button id="btn-zoom-close" class="btn ghost">Close</button>
+      </div>
+    </dialog>
+
+    <div id="toast" role="status"></div>
+
+    <noscript><p class="note">This demo needs JavaScript.</p></noscript>
+
+    <!--
+      app.js is an ES module and the shaQR module hashes with WebCrypto, which
+      browsers offer only to secure contexts. Serve the page over HTTPS or from
+      localhost (python3 -m http.server); it does not run from file:// URLs.
+    -->
+    <script>
+      if (location.protocol === "file:") {
+        const s = document.getElementById("split-status");
+        s.className = "status err";
+        s.textContent = "Serve this page over HTTPS or from localhost. It does not run from a file.";
+      }
+    </script>
+    <script src="vendor/qrcode.js"></script>
+    <script src="vendor/jsQR.js"></script>
+    <script src="vendor/zxing/reader.js"></script>
+    <script src="vendor/mono-glyphs.js"></script>
+    <script type="module" src="app.js"></script>
+  </body>
+</html>
