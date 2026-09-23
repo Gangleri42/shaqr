@@ -71,6 +71,20 @@ main section {
   }
 }
 
+.wip {
+  padding: calc(0.55rem + env(safe-area-inset-top, 0px)) 1rem 0.55rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--warn) 30%, transparent);
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-size: 0.875rem;
+  line-height: 1.4;
+  text-align: center;
+}
+
+.wip strong {
+  font-weight: 650;
+}
+
 .brand {
   display: flex;
   align-items: center;
