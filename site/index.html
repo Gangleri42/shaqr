@@ -200,9 +200,15 @@
             are the exceptions. A share is about 1/k of the secret plus 55 bytes.
           </p>
           <p>
-            For a descriptor, k and n are the wallet's own, and share x goes on the plate of
-            the x-th key. Whoever holds enough seeds to spend also holds enough plates to
-            recover, so the backup is never weaker than the wallet.
+            For a descriptor, k and n default to the wallet's own quorum. Each cosigner can then
+            keep one plate beside the seed, and whoever holds enough seeds to spend also holds
+            enough plates to recover, so the backup is never weaker than the wallet.
+          </p>
+          <p>
+            The quorum of the plates can be changed. A 3-of-5 wallet can go on 2-of-3 plates
+            where steel is short, or on more plates than it has keys. A plate carries the set
+            tag, its number and the quorum, and no key, so who keeps which plate is up to the
+            owner. Any group that has to recover the wallet needs k of them.
           </p>
           <p>
             Shares shorter than the secret cannot have perfect secrecy, so shaQR's secrecy rests
@@ -262,7 +268,8 @@
           </div>
           <p>
             The wallets are <code>wsh(sortedmulti(...))</code> of keys derived from seeds, with key
-            origins and <code>/&lt;0;1&gt;/*</code> children. A plate cell gives the characters of
+            origins and <code>/&lt;0;1&gt;/*</code> children, each split at its own quorum, the
+            default. A plate cell gives the characters of
             the share text and its QR version, in alphanumeric mode at error level L. The Shamir
             share holds the packed descriptor and the same 9 bytes of type, terminator, header and
             check as a shaQR share.
@@ -297,8 +304,8 @@
           </p>
           <p>
             <strong>Derived sets.</strong> A descriptor backup draws its key from the canonical
-            descriptor, so the same wallet always cuts the same plates, in any tool that follows
-            the spec. A lost plate can be cut again from the descriptor alone. A derived set
+            descriptor and k, so the same wallet and k always cut the same plates, in any tool
+            that follows the spec. A lost plate can be cut again from the descriptor alone. A derived set
             cannot be refreshed: splitting again gives the same plates, so a departed cosigner
             normally means a new wallet, a new descriptor and a new set. In exchange for the
             derivation, anyone who already holds every xpub can recognise the plates. They learn

@@ -1,9 +1,10 @@
 #!/usr/bin/env node
-// Pack the 3-of-5 example descriptor, cut it into a derived set and write
-// its plates to cards/ as 85 x 55 mm SVG cards, plus an A4 sheet (and a
-// PDF of it when inkscape is installed). A derived set is a function of
-// the descriptor, so running this again writes the same cards. It deletes
-// the cards of other sets from cards/ first, so that cards/ holds one set.
+// Pack the 3-of-5 example descriptor, cut it into a derived set at the
+// wallet's own quorum, the default, and write its plates to cards/ as 85 x
+// 55 mm SVG cards, plus an A4 sheet (and a PDF of it when inkscape is
+// installed). A derived set is a function of the descriptor and k, so
+// running this again writes the same cards. It deletes the cards of other
+// sets from cards/ first, so that cards/ holds one set.
 //
 // An ES module; node 22 or later runs it as `node tools/make-cards.js`.
 
@@ -15,7 +16,7 @@ import { fileURLToPath } from "node:url";
 
 import { split, combine, encode, parseHeader, TypeDescriptor } from "../js/shaqr.js";
 import { canonical, pack, quorum, unpack } from "../js/descriptor.js";
-import { buildCardSvg, buildSheetSvg, fileName, keyLabel } from "../cards.js";
+import { buildCardSvg, buildSheetSvg, fileName } from "../cards.js";
 import { EXAMPLES } from "../examples.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -53,7 +54,6 @@ const cards = shares.map((sh, i) => {
     k,
     tag,
     open: false,
-    key: keyLabel(q.keys[i]),
     kind: "descriptor",
   };
 });

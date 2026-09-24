@@ -2,28 +2,15 @@
 // glyph outlines in vendor/mono-glyphs.js, so a laser or an engraver never
 // has to resolve a font.
 //
-// A card is { text, matrix: { size, data }, x, n, k, tag, open, key,
-// kind }: the share text, its QR matrix, the plate index x and the set's n
-// and k, the set tag ("#7B63"), whether the set is open, the key the plate
-// belongs to for a descriptor (keyLabel below, or "") and kind,
-// "descriptor" or "text".
+// A card is { text, matrix: { size, data }, x, n, k, tag, open, kind }:
+// the share text, its QR matrix, the plate index x and the set's n and k,
+// the set tag ("#7B63"), whether the set is open and kind, "descriptor"
+// or "text". A card names no key: a share belongs to its set, and the
+// owner decides who keeps which plate.
 //
 // Every label line on a card starts with "#". A share runs on across
 // white space when it is typed back, and SPEC.md asks that a label next
 // to it start with a character outside base32 so that the two stay apart.
-
-import { fingerprint } from "./js/descriptor.js";
-
-// keyLabel names the key a descriptor plate belongs to, as descbackup
-// does: "[28645006]", its origin fingerprint, or "...Xy12AbCd", the last 8
-// characters of the key without its origin and children, when it has no
-// origin. Sibling xpubs share their first characters and differ at the end.
-export function keyLabel(key) {
-  const fp = fingerprint(key);
-  if (fp) return `[${fp}]`;
-  const bare = key.replace(/^\[[^\]]*\]/, "").split("/")[0];
-  return bare.length > 8 ? `...${bare.slice(-8)}` : bare;
-}
 
 const CARD_W = 85;
 const CARD_H = 55;
@@ -109,17 +96,16 @@ function layout(card, glyphs) {
 }
 
 // labels returns the head and foot lines of a card. The head carries the
-// set, with "open" after it for an open set, and the foot the key and the
-// quorum. Both start with "#".
+// set and its quorum, with "open" after it for an open set, and the plate
+// number, and the foot the quorum again. Both start with "#".
 function labels(card, glyphs) {
   const set = card.tag.toUpperCase();
   const headLeft = `${set} shaQR ${card.k}-of-${card.n}${card.open ? " open" : ""}`;
   const headRight = `PLATE ${String(card.x).padStart(2, "0")}/${String(card.n).padStart(2, "0")}`;
   const what = card.kind === "descriptor" ? "THE WALLET" : "THE SECRET";
   const room = Math.floor((CARD_W - 2 * MARGIN) / charWidth(glyphs, FOOT_MM));
-  const key = card.key ? `KEY ${card.key}  ` : "";
-  let foot = `# ${key}ANY ${card.k} OF ${card.n} PLATES REBUILD ${what}`;
-  if (foot.length > room) foot = `# ${key}ANY ${card.k} OF ${card.n} REBUILD IT`;
+  let foot = `# ANY ${card.k} OF ${card.n} PLATES REBUILD ${what}`;
+  if (foot.length > room) foot = `# ANY ${card.k} OF ${card.n} REBUILD IT`;
   return { headLeft, headRight, foot };
 }
 

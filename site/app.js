@@ -25,7 +25,7 @@ import {
   TypeDescriptor,
 } from "./js/shaqr.js";
 import { DescriptorError, canonical, pack, quorum, unpack } from "./js/descriptor.js";
-import { buildCardSvg, fileName as cardFileName, keyLabel } from "./cards.js";
+import { buildCardSvg, fileName as cardFileName } from "./cards.js";
 import { EXAMPLES } from "./examples.js";
 
 const MAX_N = 255;
@@ -70,9 +70,13 @@ const utf8 = new TextEncoder();
 const secure = window.isSecureContext && !!(globalThis.crypto && crypto.subtle);
 
 // current is the split on show in tab 1: the payload, how it was split and
-// the shares, or null.
+// the shares, or null. planned is the plan of the text in tab 1, split or
+// stopped, or null. wanted is the k and n picked for text. picked is the k
+// and n picked for the descriptor desc, whose own quorum they override.
 let current = null;
+let planned = null;
 let wanted = { k: 2, n: 3 };
+let picked = null;
 let splitGen = 0;
 let lastText = "";
 
@@ -204,7 +208,7 @@ function plateLabel({ tag, x, n, k, open }) {
 }
 
 // plateCard builds one card: the QR code of a share and its labels.
-function plateCard({ text, num, pill, pillClass, sub, key, source, onClick }) {
+function plateCard({ text, num, pill, pillClass, sub, source, onClick }) {
   const card = document.createElement("button");
   card.type = "button";
   card.className = "part";
@@ -236,15 +240,11 @@ function plateCard({ text, num, pill, pillClass, sub, key, source, onClick }) {
   const whyEl = document.createElement("span");
   whyEl.className = "sub why";
   whyEl.hidden = true;
-  const keyEl = document.createElement("span");
-  keyEl.className = "sub key";
-  keyEl.textContent = key ? `key ${key}` : "";
-  keyEl.hidden = !key;
 
-  card.append(canvas, meta, subEl, whyEl, keyEl);
+  card.append(canvas, meta, subEl, whyEl);
   drawQR(canvas, text, 232);
   if (onClick) card.addEventListener("click", onClick);
-  return { card, numText, pillEl, subEl, whyEl, keyEl };
+  return { card, numText, pillEl, subEl, whyEl };
 }
 
 // Tab 1: split.
@@ -253,14 +253,9 @@ function clamp(v, lo, hi) {
   return Math.min(hi, Math.max(lo, Math.floor(Number(v)) || lo));
 }
 
-function setQuorumControls(k, n, locked) {
+function setQuorumControls(k, n) {
   kEl.value = String(k);
   nEl.value = String(n);
-  for (const el of document.querySelectorAll(".ofn-n input, .ofn-n button")) el.disabled = locked;
-  for (const el of document.querySelectorAll(".ofn-n")) {
-    el.classList.toggle("locked", locked);
-    el.title = locked ? "k and n come from the descriptor" : "";
-  }
 }
 
 const descriptorCall = /^(sh|wsh|wpkh|pkh|pk|tr|rawtr|combo|multi|sortedmulti|multi_a|sortedmulti_a)\(/;
@@ -303,12 +298,13 @@ const realKey = new RegExp(
 
 // planFor decides how to split text (DESCRIPTOR.md): a descriptor that has
 // one multi holding every key, and every key an extended key or a hex
-// public key, is packed in canonical form as type D, with k and n from the
-// descriptor, for a derived set, or an open set when Encrypt is off.
-// Anything else is text, type U, with the k and n the user picked, for a
-// session set or an open set. For a descriptor with no such multi this
-// departs from DESCRIPTOR.md, which has the user give k and n and still
-// packs it.
+// public key, is packed in canonical form as type D, for a derived set, or
+// an open set when Encrypt is off. Its k and n default to the wallet's
+// quorum, and the user can change both, since a set is not tied to the
+// keys. Anything else is text, type U, with the k and n the user picked,
+// for a session set or an open set. For a descriptor with no such multi
+// this departs from DESCRIPTOR.md, which has the user give k and n and
+// still packs it.
 function planFor(text) {
   const bare = text.replace(/\s+/g, "");
   let desc = null;
@@ -335,19 +331,17 @@ function planFor(text) {
   }
   const keysReal = !!q && q.keys.every((key) => realKey.test(key));
   if (desc && q && keysReal) {
-    const n = q.keys.length;
-    if (q.k < 2) return { stop: `A 1-of-${n} descriptor makes no set: put the plain descriptor on every plate.` };
-    if (n > MAX_N) return { stop: `${n} keys: a set has at most ${MAX_N} plates.` };
-    return {
-      kind: "descriptor",
-      text: desc,
-      type: TypeDescriptor,
-      derived: true,
-      k: q.k,
-      n,
-      keys: q.keys.map(keyLabel),
-      changed: desc !== bare,
-    };
+    const wallet = { k: q.k, n: q.keys.length };
+    const { k, n } = picked && picked.desc === desc ? picked : wallet;
+    const plan = { kind: "descriptor", desc, wallet, k, n };
+    if (k < 2) {
+      return {
+        ...plan,
+        stop: `A 1-of-${n} descriptor makes no set: put the plain descriptor on every plate, or raise k above to cut a set anyway.`,
+      };
+    }
+    if (n > MAX_N) return { ...plan, stop: `${n} keys: a set has at most ${MAX_N} plates. Lower n above.` };
+    return { ...plan, text: desc, type: TypeDescriptor, derived: true, changed: desc !== bare };
   }
   return {
     kind: "text",
@@ -356,7 +350,6 @@ function planFor(text) {
     derived: false,
     k: wanted.k,
     n: wanted.n,
-    keys: null,
     looksLikeDescriptor: !!desc && descriptorCall.test(bare),
     oneMulti: !!q,
   };
@@ -470,15 +463,27 @@ function sizeLine(share, plain, payload) {
   );
 }
 
+// quorumNote says where the k and n of a descriptor's plates come from.
+function quorumNote({ k, n, wallet }) {
+  const own = `${wallet.k}-of-${wallet.n}`;
+  if (k === wallet.k && n === wallet.n) {
+    return `The quorum of the plates defaults to the wallet's, ${own}, and can be changed above.`;
+  }
+  return (
+    `The quorum of the plates defaults to the wallet's, ${own}, and is ${k}-of-${n} here: ` +
+    `any group that has to recover the wallet needs ${k} of these plates.`
+  );
+}
+
 // noteFor says what kind of set a split made, and why.
 function noteFor(plan, payload, open) {
   if (plan.kind === "descriptor") {
     return (
       `Descriptor in canonical form, packed from ${plan.text.length} characters to ${payload.length} bytes, ` +
       (open
-        ? `in an open set: the same wallet always gives the same plates, and each plate shows part of the descriptor, the first ${plan.k} plates in the clear. `
-        : "in a derived set: the same wallet always gives the same plates. ") +
-      "k and n come from the descriptor, and each plate names its key." +
+        ? `in an open set: the same wallet and k always give the same plates, and each plate shows part of the descriptor, the first ${plan.k} plates in the clear. `
+        : "in a derived set: the same wallet and k always give the same plates. ") +
+      quorumNote(plan) +
       (plan.changed
         ? " Recovery gives back the canonical form, which can differ from your input in key order, hardened marks, children and checksum."
         : "")
@@ -501,9 +506,10 @@ async function runSplit() {
   const text = inputEl.value.trim();
   const open = !encryptEl.checked;
   lastText = text;
+  planned = null;
 
   if (!text) {
-    setQuorumControls(wanted.k, wanted.n, false);
+    setQuorumControls(wanted.k, wanted.n);
     return clearSplit("Paste a descriptor or any other secret. It splits as you type.");
   }
   if (!secure) {
@@ -517,14 +523,15 @@ async function runSplit() {
   try {
     plan = planFor(text);
   } catch (err) {
-    setQuorumControls(wanted.k, wanted.n, false);
+    setQuorumControls(wanted.k, wanted.n);
     return clearSplit(err.message, "status err");
   }
+  planned = plan;
   if (plan.stop) {
-    setQuorumControls(wanted.k, wanted.n, false);
+    setQuorumControls(plan.k ?? wanted.k, plan.n ?? wanted.n);
     return clearSplit(plan.stop, "status warn");
   }
-  setQuorumControls(plan.k, plan.n, plan.kind === "descriptor");
+  setQuorumControls(plan.k, plan.n);
 
   let payload;
   let shares;
@@ -583,22 +590,13 @@ async function runSplit() {
 
   const frag = document.createDocumentFragment();
   texts.forEach((t, i) => {
-    const plate = {
-      text: t,
-      tag: current.tag,
-      x: i + 1,
-      n: current.n,
-      k: current.k,
-      open,
-      key: current.keys ? current.keys[i] : "",
-    };
+    const plate = { text: t, tag: current.tag, x: i + 1, n: current.n, k: current.k, open };
     const { card } = plateCard({
       text: t,
       num: String(i + 1).padStart(2, "0"),
       pill: open ? `${current.tag} open` : current.tag,
       pillClass: "set",
       sub: "",
-      key: plate.key,
       onClick: () => openZoom(plate),
     });
     frag.append(card);
@@ -608,7 +606,7 @@ async function runSplit() {
 
 function openZoom(plate) {
   drawQR(zoomCanvas, plate.text, 440);
-  zoomLabel.textContent = plateLabel(plate) + (plate.key ? ` · key ${plate.key}` : "");
+  zoomLabel.textContent = plateLabel(plate);
   zoomText.textContent = plate.text;
   zoomCopy = plate.text;
   dlgZoom.showModal();
@@ -633,7 +631,6 @@ function syncRecover() {
       source: "split",
       checked: false,
       n: current.n,
-      key: current.keys ? current.keys[i] : "",
     }));
     rec.entries = [...mirrored, ...rec.entries];
   }
@@ -697,7 +694,6 @@ function renderRec() {
       pill: "…",
       pillClass: "data",
       sub: "",
-      key: e.key,
       source: sourceName[e.source],
       onClick: () => {
         e.checked = !e.checked;
@@ -733,7 +729,7 @@ const reasons = {
 
 function paintEntry(e) {
   if (!e.view) return;
-  const { card, numText, pillEl, subEl, whyEl, keyEl } = e.view;
+  const { card, numText, pillEl, subEl, whyEl } = e.view;
   numText.textContent = entryNum(e);
   card.classList.toggle("off", !e.checked);
   card.setAttribute("aria-pressed", String(e.checked));
@@ -754,8 +750,6 @@ function paintEntry(e) {
   subEl.hidden = !subEl.textContent;
   whyEl.textContent = reasons[state] || "";
   whyEl.hidden = !whyEl.textContent;
-  keyEl.textContent = e.key ? `key ${e.key}` : "";
-  keyEl.hidden = !e.key;
 }
 
 // readHeads verifies each share once, as a scanner would the moment it
@@ -774,18 +768,14 @@ async function readHeads() {
 }
 
 // readDescriptor unpacks the payload of a recovered type D set into
-// s.text, or records in s.unpackError why it does not unpack, and names
-// the key of each plate from the quorum of the text.
+// s.text, or records in s.unpackError why it does not unpack.
 async function readDescriptor(s) {
   try {
     s.text = await unpack(s.result.payload);
   } catch (err) {
     if (!(err instanceof DescriptorError)) throw err;
     s.unpackError = err.code;
-    return;
   }
-  const q = quorum(s.text);
-  if (q) for (const e of s.members) if (!e.key && q.keys[e.head.x - 1]) e.key = keyLabel(q.keys[e.head.x - 1]);
 }
 
 // assess works out the state of every selected share and recovers every set
@@ -1414,7 +1404,7 @@ function downloadPng() {
   const quiet = 4;
   const codes = current.texts.map((t) => qrFor(t).modules);
   const side = (codes[0].size + 2 * quiet) * scale;
-  const labelH = current.keys ? 44 : 26;
+  const labelH = 26;
   const cols = Math.min(current.n, Math.max(3, Math.ceil(Math.sqrt(current.n))));
   const rows = Math.ceil(current.n / cols);
   const gap = 24;
@@ -1444,11 +1434,6 @@ function downloadPng() {
     do ctx.font = `600 ${px}px system-ui, sans-serif`;
     while (ctx.measureText(label).width > side + gap - 8 && --px > 9);
     ctx.fillText(label, cx, y0 + side);
-    if (current.keys) {
-      ctx.font = "14px ui-monospace, monospace";
-      ctx.fillStyle = "#555";
-      ctx.fillText(`key ${current.keys[i]}`, cx, y0 + side + 20);
-    }
   });
   canvas.toBlob((blob) => download(`${setName()}.png`, blob), "image/png");
 }
@@ -1467,7 +1452,6 @@ function downloadCards() {
         k: current.k,
         tag: current.tag,
         open: current.open,
-        key: current.keys ? current.keys[i] : "",
         kind: current.kind,
       };
       return { name: cardFileName(card), svg: buildCardSvg(card, MONO_GLYPHS) };
@@ -1500,6 +1484,9 @@ function toast(msg) {
 
 // Wiring.
 
+// readQuorum takes the k and n of the controls, for the descriptor in
+// tab 1 when there is one, in place of the wallet's quorum, and for text
+// otherwise.
 function readQuorum(changed) {
   let k = clamp(kEl.value, 2, MAX_N);
   let n = clamp(nEl.value, 2, MAX_N);
@@ -1507,7 +1494,8 @@ function readQuorum(changed) {
     if (changed === "n") k = n;
     else n = k;
   }
-  wanted = { k, n };
+  if (planned && planned.kind === "descriptor") picked = { desc: planned.desc, k, n };
+  else wanted = { k, n };
   kEl.value = String(k);
   nEl.value = String(n);
 }
