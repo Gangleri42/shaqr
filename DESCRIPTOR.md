@@ -11,10 +11,11 @@ How a device lays out a plate, and which sizes it accepts, is the device's own
 business.
 
 A k-of-n multisig survives the loss of n-k seeds. It does not survive the loss
-of one extended public key, because spending needs all n of them. The backup
-puts one share of the descriptor on each signer's plate, beside the seed. Any
-k plates then hold a signing quorum together with the descriptor that quorum
-needs.
+of one extended public key, because spending needs all n of them. By default
+the backup puts one share of the descriptor on each signer's plate, beside the
+seed, and any k plates then hold a signing quorum together with the descriptor
+that quorum needs. The quorum of the plates can also be chosen apart from the
+wallet's (see Threshold).
 
 The payload is the descriptor in canonical form, packed, with content type D.
 The canonical form makes one wallet give one text whichever program exported
@@ -154,28 +155,32 @@ makes a receiver refuse bytes packed by other rules.
 
 ## Threshold
 
-k is the descriptor's signing threshold and n is its number of keys. Both can
-be read from the descriptor when it has a single `multi`, `sortedmulti`,
-`multi_a` or `sortedmulti_a` and every key sits in it. For any other
-descriptor, including a `tr()` whose internal key stands apart, the user gives
-k and n.
+By default k is the descriptor's signing threshold and n its number of keys,
+so that each cosigner can keep one plate and any group that can sign also
+holds k plates. Both can be read from the descriptor when it has a single
+`multi`, `sortedmulti`, `multi_a` or `sortedmulti_a` and every key sits in it.
+For any other descriptor, including a `tr()` whose internal key stands apart,
+the default k is the size of the smallest group of keys that can spend on any
+path, since a larger k would leave that group able to sign and unable to find
+its coins, and the user gives n.
 
-The k to give is the size of the smallest group of keys that can spend on any
-path. A larger k would leave that group able to sign and unable to find its
-coins.
+The user may override both. A share set is not tied to the keys: a 3-of-5
+wallet can be backed up on 2-of-3 plates where steel is short, or on more
+plates than it has keys. Whoever keeps the plates, any group that has to
+recover the wallet must be able to gather k of them.
 
-A 1-of-n descriptor makes no set, since k is at least 2. Each plate carries
+A default of 1-of-n makes no set, since k is at least 2. Each plate carries
 the plain descriptor.
 
 Bitcoin allows 3 keys in a bare `multi`, 15 under `sh`, 20 under `wsh` and 999
-in a `multi_a` leaf. A descriptor with more than 255 keys cannot have one share
-per key.
+in a `multi_a` leaf, and a set has at most 255 shares.
 
-## Which share goes where
+## Plates
 
-Share x goes on the plate of the x-th key of the canonical descriptor. Where
-that order does not match the signers, as with a `tr()` internal key that signs
-for no one, the user assigns the plates.
+A plate carries its share and a label that starts with `#`: the set tag, the
+plate number, the quorum and, where the owner wants it, the wallet's name. It
+names no key, since a share belongs to the set and not to a cosigner. The
+owner decides who keeps which plate.
 
 ## Derived and open sets
 
