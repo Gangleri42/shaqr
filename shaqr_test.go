@@ -869,3 +869,20 @@ func TestLargeQuorumWithForgery(t *testing.T) {
 		}
 	}
 }
+
+// TestNoDefaultRand stands in for a bare-metal build, where defaultRand is
+// nil: a session set then needs Splitter.Rand, while derived and open sets
+// never read it.
+func TestNoDefaultRand(t *testing.T) {
+	saved := defaultRand
+	defaultRand = nil
+	defer func() { defaultRand = saved }()
+	if _, err := Split([]byte("secret"), TypeText, 2, 3); err == nil {
+		t.Fatal("a session set with no random source split")
+	}
+	for _, s := range []Splitter{{Derived: true}, {Open: true}} {
+		if _, err := s.Split([]byte("secret"), TypeText, 2, 3); err != nil {
+			t.Fatalf("%+v: %v", s, err)
+		}
+	}
+}

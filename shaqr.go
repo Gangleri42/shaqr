@@ -13,7 +13,6 @@ import (
 	"bytes"
 	"cmp"
 	"crypto/hmac"
-	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"errors"
@@ -76,7 +75,8 @@ var (
 // A Splitter makes share sets. The zero value makes sealed session sets
 // with r from crypto/rand and no padding.
 type Splitter struct {
-	// Rand supplies the 32 bytes of r. Nil means crypto/rand.Reader.
+	// Rand supplies the 32 bytes of r. Nil means crypto/rand.Reader on a
+	// host; a bare-metal build has no default and needs one set here.
 	// Derived and open sets read nothing from it.
 	Rand io.Reader
 
@@ -165,13 +165,20 @@ func (s *Splitter) options() error {
 
 // random returns r: nothing for a derived or open set, else 32 bytes from
 // s.Rand.
+// defaultRand is the source of r when Splitter.Rand is nil. rand_default.go
+// sets it on hosts; it stays nil on bare metal.
+var defaultRand io.Reader
+
 func (s *Splitter) random() ([]byte, error) {
 	if s.Derived || s.Open {
 		return nil, nil
 	}
 	src := s.Rand
 	if src == nil {
-		src = rand.Reader
+		src = defaultRand
+	}
+	if src == nil {
+		return nil, errors.New("shaqr: no random source for a session set: set Splitter.Rand")
 	}
 	r := make([]byte, 32)
 	if _, err := io.ReadFull(src, r); err != nil {
