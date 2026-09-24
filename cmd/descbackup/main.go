@@ -1,29 +1,32 @@
 // SPDX-License-Identifier: CC0-1.0
 
-// Descbackup splits a multisig wallet descriptor across the signers' seed
-// plates and recovers it from any quorum of them, as DESCRIPTOR.md
-// describes.
+// Descbackup splits a multisig wallet descriptor into a set of plates,
+// by default one for each signer's seed, and recovers it from any k of
+// them, as DESCRIPTOR.md describes.
 //
 //	descbackup split [-open] [-k K] [-n N] [DESCRIPTOR]
 //	descbackup recover < plates.txt
-//	descbackup replace X < plates.txt
+//	descbackup replace [-n N] X < plates.txt
 //
 // Split puts the descriptor in canonical form, packs it and cuts a
 // derived set of it, so that every run cuts the same plates from the
-// same wallet. With -open it cuts an open set instead, whose plates are
-// 32 bytes shorter and each show part of the descriptor. It refuses to
-// cut an open set of a descriptor that holds a private key, or a key
-// that looks like one. It takes the descriptor from its argument, or
-// from standard input when there is none or it is "-", which keeps the
-// keys out of the shell's history. It reads k and n from a descriptor
-// whose keys all sit in one multi, sortedmulti, multi_a or
-// sortedmulti_a, and labels share x with the x-th key and with the
-// format of its set, sealed or open. For any other descriptor give -k,
-// the size of the smallest group of keys that can spend, and -n, and
-// assign the plates yourself. It checks the origin and the path of every
-// key and the base58check of every extended key, and warns when the
-// descriptor has no checksum, since then nothing shows that it is the
-// wallet's. A 1-of-n descriptor makes no set: split prints the canonical
+// same wallet and k. With -open it cuts an open set instead, whose
+// plates are 32 bytes shorter and each show part of the descriptor. It
+// refuses to cut an open set of a descriptor that holds a private key,
+// or a key that looks like one. It takes the descriptor from its
+// argument, or from standard input when there is none or it is "-",
+// which keeps the keys out of the shell's history. By default k and n
+// are the wallet's quorum, which it reads from a descriptor whose keys
+// all sit in one multi, sortedmulti, multi_a or sortedmulti_a. -k and -n
+// override either, since a set is not tied to the keys: a 3-of-5 wallet
+// can go on 2-of-3 plates. For any other descriptor give -k, the size of
+// the smallest group of keys that can spend, and -n. It labels share x
+// with its set, the quorum of the set and its format, sealed or open,
+// and names no key: the owner decides who keeps which plate. It checks
+// the origin and the path of every key and the base58check of every
+// extended key, and warns when the descriptor has no checksum, since
+// then nothing shows that it is the wallet's. A k of 1, the default of a
+// 1-of-n descriptor, makes no set: split prints the canonical
 // descriptor, which goes on every plate as it is. Every other line it
 // prints that is not a share starts with "#".
 //
@@ -35,7 +38,10 @@
 // holds k shares of and prints it with its checksum, byte for byte, with
 // a warning when it is not a descriptor in canonical form. Replace
 // prints share X of the one set it holds k shares of, to cut a lost
-// plate again or add one.
+// plate again or add one. A share does not tell n, so replace labels it
+// with the wallet's number of keys when the set's k is the wallet's
+// threshold, as split does by default, and with the n of -n when it is
+// given.
 package main
 
 import (
@@ -63,36 +69,46 @@ import (
 // wrong arguments.
 var errUsage = errors.New(`usage: descbackup split [-open] [-k K] [-n N] [DESCRIPTOR]
        descbackup recover < plates.txt
-       descbackup replace X < plates.txt
+       descbackup replace [-n N] X < plates.txt
        descbackup -h`)
 
 // help explains the commands and flags, for -h.
-const help = `Descbackup splits a multisig wallet descriptor across the signers' seed
-plates and recovers it from any quorum of them (DESCRIPTOR.md).
+const help = `Descbackup splits a multisig wallet descriptor into a set of plates, by
+default one for each signer's seed, and recovers it from any k of them
+(DESCRIPTOR.md).
 
 descbackup split [-open] [-k K] [-n N] [DESCRIPTOR]
-    Print the plates: a label and a share for each key of the descriptor.
-    The shares form a sealed set: below k plates, they show nothing of the
-    descriptor to anyone who lacks one of its keys. The descriptor comes
-    from the argument, or from standard input when there is none or it is
-    "-". Flags go before it.
+    Print the plates: a label and a share for each of the n plates. A
+    label names the set, its quorum and its format, and no key. The shares
+    form a sealed set: below k plates, they show nothing of the descriptor
+    to anyone who lacks one of its keys. The descriptor comes from the
+    argument, or from standard input when there is none or it is "-".
+    Flags go before it.
 
     -open  cut an open set: every plate is 32 bytes shorter and shows
            part of the descriptor; the first k plates hold slices of it,
            whole public keys among them. Not for a descriptor that holds
            a private key.
-    -k K   the number of plates needed to recover: the smallest group of
-           keys that can spend. Give it, and -n, when the keys are not
-           all in one multi, sortedmulti, multi_a or sortedmulti_a.
-    -n N   the number of plates to make.
+    -k K   the number of plates needed to recover, from 2 to N. A k of 1
+           makes no set and prints the descriptor for every plate.
+    -n N   the number of plates to make, at most 255.
+
+    -k and -n default to the wallet's quorum, its threshold and its number
+    of keys, when the keys are all in one multi, sortedmulti, multi_a or
+    sortedmulti_a. Either can differ from it: a 3-of-5 wallet can go on
+    2-of-3 plates. Any group that has to recover the wallet needs k of
+    them. For any other descriptor give both, with -k the size of the
+    smallest group of keys that can spend.
 
 descbackup recover < plates.txt
     Print the descriptor of every set the text holds enough shares of,
     and report every share it leaves out.
 
-descbackup replace X < plates.txt
+descbackup replace [-n N] X < plates.txt
     Print share X, a number from 1 to 255, of the one set the text holds
-    enough shares of, to cut a lost plate again or to add one.
+    enough shares of, to cut a lost plate again or to add one. A share
+    does not tell n: the label gives the wallet's number of keys when the
+    set's k is the wallet's threshold, and -n N when it is given.
 `
 
 func main() {
@@ -174,7 +190,7 @@ func splitCmd(args []string, in io.Reader, out io.Writer, logger *log.Logger) er
 	if *openSet && private(desc) {
 		return errors.New("the descriptor holds a private key, and the plates of an open set would show it: leave out -open")
 	}
-	qk, qn, keys, err := threshold(desc, *k, *n)
+	qk, qn, err := threshold(desc, *k, *n)
 	if err != nil {
 		return err
 	}
@@ -199,37 +215,43 @@ func splitCmd(args []string, in io.Reader, out io.Writer, logger *log.Logger) er
 	h, _ := shaqr.ParseHeader(shares[0])
 	fmt.Fprintf(out, "# set %s (%s), %d bytes per share\n", h.Tag(), summary(h, qn), len(shares[0]))
 	for i, sh := range shares {
-		fmt.Fprintf(out, "%s\n%s\n", label(h, i+1, qn, keys), shaqr.Encode(sh))
+		fmt.Fprintf(out, "%s\n%s\n", label(h, i+1, qn), shaqr.Encode(sh))
 	}
 	return nil
 }
 
-// threshold returns k, n and the keys whose plates the shares go on. A
-// descriptor whose keys all sit in one multi gives them itself
-// (DESCRIPTOR.md Threshold), and flags given beside it must agree, since
-// another k would cut another set. For any other descriptor the flags
-// give k and n, and keys is nil: the user assigns the plates. A k of 1
-// means no set: the descriptor goes on every plate as it is.
-func threshold(desc string, k, n int) (int, int, []string, error) {
+// threshold returns k and n. By default they are the wallet's quorum,
+// the threshold and the number of keys of a descriptor whose keys all
+// sit in one multi (DESCRIPTOR.md Threshold), and the flags, 0 when not
+// given, override either, since a set is not tied to the keys. For any
+// other descriptor the flags give both. A k of 1 means no set: the
+// descriptor goes on every plate as it is.
+func threshold(desc string, k, n int) (int, int, error) {
 	qk, keys, ok := descriptor.Quorum(desc)
+	fromKeys := ok && n == 0
 	switch {
-	case ok && (k != 0 && k != qk || n != 0 && n != len(keys)):
-		return 0, 0, nil, fmt.Errorf("the descriptor is %d-of-%d: leave out -k and -n or give those", qk, len(keys))
 	case ok:
-		k, n = qk, len(keys)
+		if k == 0 {
+			k = qk
+		}
+		if n == 0 {
+			n = len(keys)
+		}
 	case k == 0 || n == 0:
-		return 0, 0, nil, errors.New("the keys are not all in one multi: give -k, the smallest group of keys that can spend, and -n")
-	case k < 1 || k > n:
-		return 0, 0, nil, fmt.Errorf("-k %d -n %d: k must be from 1 to n", k, n)
+		return 0, 0, errors.New("the keys are not all in one multi: give -k, the smallest group of keys that can spend, and -n")
 	}
 	switch {
+	case (k < 1 || k > n) && ok:
+		return 0, 0, fmt.Errorf("%d-of-%d: k must be from 1 to n; the wallet is %d-of-%d, and -k and -n change either", k, n, qk, len(keys))
+	case k < 1 || k > n:
+		return 0, 0, fmt.Errorf("-k %d -n %d: k must be from 1 to n", k, n)
 	case k == 1:
-	case n > 255 && ok:
-		return 0, 0, nil, fmt.Errorf("%d keys: a set has at most 255 shares", n)
+	case n > 255 && fromKeys:
+		return 0, 0, fmt.Errorf("%d keys: a set has at most 255 shares; give -n", n)
 	case n > 255:
-		return 0, 0, nil, fmt.Errorf("-n %d: a set has at most 255 shares", n)
+		return 0, 0, fmt.Errorf("-n %d: a set has at most 255 shares", n)
 	}
-	return k, n, keys, nil
+	return k, n, nil
 }
 
 var (
@@ -378,11 +400,11 @@ func base58Check(s string) []byte {
 }
 
 // label is the line above share x of the set whose header is h: its set,
-// its quorum and format, and whose plate it goes on, as in "# share 1 of
-// set #E096 (2-of-3, sealed), key [0badc0de]". n is 0 when nothing tells
-// it.
-func label(h shaqr.Header, x, n int, keys []string) string {
-	return fmt.Sprintf("# share %d of set %s (%s)%s", x, h.Tag(), summary(h, n), plate(keys, x))
+// its quorum and its format, as in "# share 1 of set #E096 (2-of-3,
+// sealed)". It names no key, since a share belongs to the set and not to
+// a cosigner (DESCRIPTOR.md Plates). n is 0 when nothing tells it.
+func label(h shaqr.Header, x, n int) string {
+	return fmt.Sprintf("# share %d of set %s (%s)", x, h.Tag(), summary(h, n))
 }
 
 // summary gives the quorum and the format of the set whose header is h,
@@ -399,29 +421,17 @@ func summary(h shaqr.Header, n int) string {
 	return fmt.Sprintf("%d-of-%d, %s", h.K, n, format)
 }
 
-// plate says whose plate share x goes on: ", key [fp]" with the origin
-// fingerprint of the x-th key, or, when it has no origin, ", key ..." and
-// the last 8 characters of the key without its children. Sibling xpubs
-// share their first characters and differ at the end. It says nothing
-// when the descriptor does not tell.
-func plate(keys []string, x int) string {
-	if x > len(keys) {
-		return ""
+// defaultN returns the number of plates of a set whose header is h and
+// whose descriptor is desc, which no share tells: the wallet's number of
+// keys when the set's k is the wallet's threshold, as split cuts a set
+// by default. It returns 0, which labels write as "k needed", when the
+// descriptor gives no quorum, when the set has another k, and when the
+// wallet has more keys than a set has shares.
+func defaultN(h shaqr.Header, desc string) int {
+	if k, keys, ok := descriptor.Quorum(desc); ok && k == h.K && len(keys) <= 255 {
+		return len(keys)
 	}
-	key := keys[x-1]
-	if fp := descriptor.Fingerprint(key); fp != "" {
-		return ", key [" + fp + "]"
-	}
-	if strings.HasPrefix(key, "[") {
-		if i := strings.IndexByte(key, ']'); i >= 0 {
-			key = key[i+1:]
-		}
-	}
-	key, _, _ = strings.Cut(key, "/")
-	if len(key) > 8 {
-		key = "..." + key[len(key)-8:]
-	}
-	return ", key " + key
+	return 0
 }
 
 // recoverCmd prints the descriptor of every set the input holds k shares
@@ -459,14 +469,27 @@ func recoverCmd(in io.Reader, out io.Writer, logger *log.Logger) error {
 // replaceCmd prints share x of the one set the input holds k shares of
 // (SPEC.md Replacing a lost share). It recovers and checks the
 // descriptor first, as recoverCmd does, and labels the share with its
-// key.
+// set, the quorum and the format: n from -n, or else defaultN, and k
+// alone when x is past that n.
 func replaceCmd(args []string, in io.Reader, out io.Writer, logger *log.Logger) error {
-	if len(args) != 1 {
+	fs := flag.NewFlagSet("replace", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	nFlag := fs.Int("n", 0, "plates in the set")
+	switch err := fs.Parse(args); {
+	case errors.Is(err, flag.ErrHelp):
+		fmt.Fprint(out, help)
+		return nil
+	case err != nil:
+		return fmt.Errorf("%v\n%w", err, errUsage)
+	case fs.NArg() != 1:
 		return errUsage
 	}
-	x, err := strconv.Atoi(args[0])
+	x, err := strconv.Atoi(fs.Arg(0))
 	if err != nil || x < 1 || x > 255 {
 		return fmt.Errorf("X must be a number from 1 to 255\n%w", errUsage)
+	}
+	if *nFlag != 0 && (*nFlag < 2 || *nFlag > 255) {
+		return fmt.Errorf("-n must be a number from 2 to 255\n%w", errUsage)
 	}
 	sets, err := recoverSets(in, logger)
 	if err != nil {
@@ -490,12 +513,21 @@ func replaceCmd(args []string, in io.Reader, out io.Writer, logger *log.Logger) 
 	if err != nil {
 		return err
 	}
-	_, keys, ok := descriptor.Quorum(r.desc)
-	n := len(keys)
-	if ok && x > n {
-		logger.Printf("share %d goes on no key's plate: the descriptor has %d keys, so it is an extra plate of set %s", x, n, r.hdr.Tag())
+	n := *nFlag
+	switch {
+	case n == 0:
+		n = defaultN(r.hdr, r.desc)
+		if n != 0 && x > n {
+			logger.Printf("share %d is past plate %d of set %s, the wallet's number of keys; if the set was cut with more plates, give -n with that number to label it",
+				x, n, r.hdr.Tag())
+			n = 0
+		}
+	case n < r.hdr.K:
+		return fmt.Errorf("-n %d: set %s needs %d plates, so it has at least %d", n, r.hdr.Tag(), r.hdr.K, r.hdr.K)
+	case x > n:
+		return fmt.Errorf("-n %d: share %d is past the last plate of set %s", n, x, r.hdr.Tag())
 	}
-	fmt.Fprintf(out, "%s\n%s\n", label(r.hdr, x, n, keys), shaqr.Encode(sh))
+	fmt.Fprintf(out, "%s\n%s\n", label(r.hdr, x, n), shaqr.Encode(sh))
 	return nil
 }
 
@@ -509,14 +541,12 @@ type result struct {
 	err     error
 }
 
-// name names the set in a message: its tag, its quorum when its
-// descriptor tells it, and its format, as in "#E096 (2-of-3, sealed)".
+// name names the set in a message: its tag, its quorum, with the n of
+// defaultN, and its format, as in "#E096 (2-of-3, sealed)".
 func (r result) name() string {
 	n := 0
 	if r.err == nil {
-		if _, keys, ok := descriptor.Quorum(r.desc); ok {
-			n = len(keys)
-		}
+		n = defaultN(r.hdr, r.desc)
 	}
 	return fmt.Sprintf("%s (%s)", r.hdr.Tag(), summary(r.hdr, n))
 }

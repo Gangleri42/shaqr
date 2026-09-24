@@ -131,9 +131,9 @@ func TestSplitRecover(t *testing.T) {
 		}
 		set := fmt.Sprintf("set %s (2-of-3, %s)", tag, c.format)
 		want := fmt.Sprintf("# %s, %d bytes per share\n", set, c.size) +
-			"# share 1 of " + set + ", key [28645006]\n" + plates[0] + "\n" +
-			"# share 2 of " + set + ", key [73c5da0a]\n" + plates[1] + "\n" +
-			"# share 3 of " + set + ", key [b8688df1]\n" + plates[2] + "\n"
+			"# share 1 of " + set + "\n" + plates[0] + "\n" +
+			"# share 2 of " + set + "\n" + plates[1] + "\n" +
+			"# share 3 of " + set + "\n" + plates[2] + "\n"
 		if out != want {
 			t.Errorf("split %q printed\n%s\nwant\n%s", c.flags, out, want)
 		}
@@ -207,7 +207,8 @@ func TestSplitInput(t *testing.T) {
 	}
 	for _, args := range [][]string{{"split", "-h"}, {"-h"}, {"help"}} {
 		out, _, err := descbackup("", args...)
-		if err != nil || !strings.Contains(out, "-k K   the number of plates needed to recover") {
+		if err != nil || !strings.Contains(out, "-k K   the number of plates needed to recover") ||
+			!strings.Contains(out, "-k and -n default to the wallet's quorum") {
 			t.Errorf("%q: %v\n%s", args, err, out)
 		}
 	}
@@ -228,24 +229,49 @@ func TestSplitThreshold(t *testing.T) {
 		args []string
 		err  string
 	}{
-		{[]string{"-k", "3", export}, "the descriptor is 2-of-3"},
-		{[]string{"-n", "4", export}, "the descriptor is 2-of-3"},
+		{[]string{"-k", "4", export}, "4-of-3: k must be from 1 to n; the wallet is 2-of-3, and -k and -n change either"},
+		{[]string{"-n", "1", export}, "2-of-1: k must be from 1 to n; the wallet is 2-of-3"},
+		{[]string{"-k", "-1", export}, "-1-of-3: k must be from 1 to n"},
+		{[]string{"-n", "256", export}, "-n 256: a set has at most 255 shares"},
 		{[]string{"wpkh(" + key + ")"}, "give -k"},
 		{[]string{"-k", "2", "wpkh(" + key + ")"}, "give -k"},
 		{[]string{"-k", "3", "-n", "2", "wpkh(" + key + ")"}, "k must be from 1 to n"},
 		{[]string{"wsh(sortedmulti(2," + key + "," + bare + "))#aaaaaaaa"}, "checksum"},
 		{[]string{"-k", "2", "-n", "256", "wpkh(" + key + ")"}, "-n 256: a set has at most 255 shares"},
-		{[]string{"wsh(multi(2," + strings.Join(keys256, ",") + "))"}, "256 keys: a set has at most 255 shares"},
+		{[]string{"wsh(multi(2," + strings.Join(keys256, ",") + "))"}, "256 keys: a set has at most 255 shares; give -n"},
 	} {
 		if _, _, err := descbackup("", append([]string{"split"}, c.args...)...); err == nil || !strings.Contains(err.Error(), c.err) {
 			t.Errorf("split %.80q: %v, want %q", c.args, err, c.err)
 		}
 	}
 
-	// A 1-of-n descriptor makes no set: every plate carries it.
-	out, _, err := descbackup("", "split", "wsh(sortedmulti(1,"+key+","+bare+"))")
-	if err != nil || !strings.HasPrefix(out, "# 1-of-2: no set; every plate carries this descriptor as it is\nwsh(sortedmulti(1,") {
-		t.Errorf("split of a 1-of-2 = %v\n%s", err, out)
+	// A 1-of-n descriptor makes no set by default: every plate carries
+	// it. So does a k of 1 given with -k. A k of 2 makes a set of it.
+	oneOfTwo := "wsh(sortedmulti(1," + key + "," + bare + "))"
+	for _, c := range []struct {
+		args []string
+		want string
+	}{
+		{nil, "# 1-of-2: no set; every plate carries this descriptor as it is\nwsh(sortedmulti(1,"},
+		{[]string{"-n", "300"}, "# 1-of-300: no set; every plate carries this descriptor as it is\nwsh(sortedmulti(1,"},
+		{[]string{"-k", "1", "-n", "3"}, "# 1-of-3: no set; every plate carries this descriptor as it is\nwsh(sortedmulti(1,"},
+		{[]string{"-k", "1"}, "# 1-of-2: no set"},
+		{[]string{"-k", "2", "-n", "3"}, "# set #"},
+	} {
+		out, _, err := descbackup("", append(append([]string{"split"}, c.args...), oneOfTwo)...)
+		if err != nil || !strings.HasPrefix(out, c.want) {
+			t.Errorf("split %q of a 1-of-2 = %v\n%s", c.args, err, out)
+		}
+	}
+	oneOfThree, _, _ := descbackup("", "split", "-k", "1", "-n", "3", export)
+	if !strings.HasPrefix(oneOfThree, "# 1-of-3: no set;") {
+		t.Errorf("split -k 1 of a 2-of-3 printed\n%s", oneOfThree)
+	}
+
+	// -n brings a wallet of more than 255 keys into a set.
+	out, _, err := descbackup("", "split", "-n", "3", "wsh(multi(2,"+strings.Join(keys256, ",")+"))")
+	if err != nil || !strings.Contains(out, " (2-of-3, sealed), ") || strings.Count(out, "SHAQR:") != 3 {
+		t.Errorf("split -n 3 of 256 keys = %v\n%s", err, out)
 	}
 
 	// A descriptor that does not say which key goes with which share
@@ -255,11 +281,127 @@ func TestSplitThreshold(t *testing.T) {
 		t.Errorf("split of a tr() = %v\n%s", err, out)
 	}
 
-	// A key without an origin is named by its last 8 characters, without
-	// the children that the canonical form gives it.
+	// A label names no key, whether it has an origin or not.
 	out, _, err = descbackup("", "split", "wsh(multi(2,"+key+","+bare+"))")
-	if err != nil || !strings.Contains(out, " (2-of-2, sealed), key [d34db33f]\n") || !strings.Contains(out, " (2-of-2, sealed), key ...Uv6fcLW5\n") {
+	if err != nil || !strings.Contains(out, "# share 1 of set #") || !strings.Contains(out, " (2-of-2, sealed)\nSHAQR:") ||
+		strings.Contains(out, "key") || strings.Contains(out, "d34db33f") || strings.Contains(out, "Uv6fcLW5") {
 		t.Errorf("split with a bare key = %v\n%s", err, out)
+	}
+}
+
+// wallet35 is the 3-of-5 wallet of DESCRIPTOR.md Sizes, in canonical
+// form.
+const wallet35 = "wsh(sortedmulti(3," +
+	"[759b1073/48h/0h/0h/2h]xpub6ECC8DopPsi43ovwsteKfSUPbUZEZuknv2AwP54DqmFzUxUjNMyvkCzbSxN6XnFo9DEkWdqpSy87oF6nH6tiWcLmq1B7cMiUuUeQB5w7Tmi/<0;1>/*," +
+	"[a9394e65/48h/0h/0h/2h]xpub6EwPeoVByhLBu5Zd45gkzU9HmNyrC3EYkxsS1xoBDd115MWfJ7EfDS7EwjSVF2iZ7ZSJemRrToAipmp9XbW8d42bSET8Pq9V8Hh37FVC9AZ/<0;1>/*," +
+	"[ae088dba/48h/0h/0h/2h]xpub6FH2AWEZgkQL8uN1UFkcimcGqFsrivLjt2ouwak9P1aBBpRwZqoqifN9YvChBEQCkKsiuqD252yQs2Y3Y4PtfjgeK5E2cBRyy8Jy9uEcfnp/<0;1>/*," +
+	"[dfd3ff9b/48h/0h/0h/2h]xpub6F8wrnn9eAgauZEG7bZoQips14Jrk6wcHGrcWsK5Lo2vaPdiryZrKH7pzkajZwb3gXuvztqNBRwwcDUR4WiLjMaabJWwMM7mAFMnSbyn9ps/<0;1>/*," +
+	"[ec68d459/48h/0h/0h/2h]xpub6E8ep22nvtyeoRSNRyB8D6iL2Hic86F5BA1FLwiiHXRxubT9C6qSPUD5k659ASXpAMcaiBBgZziNPCFmBaofqGsvWhyy3szgLLAZW94UdVm/<0;1>/*))#wlklsul6"
+
+// cut splits wallet35 with args and returns the set's tag and its plates.
+// It checks the labels, which name the set, its quorum and its format
+// and no key.
+func cut(t *testing.T, k, n int, args ...string) (tag string, plates []string) {
+	t.Helper()
+	out, reports, err := descbackup("", append(append([]string{"split"}, args...), wallet35)...)
+	if err != nil || reports != "" {
+		t.Fatalf("split %q = %v, %q", args, err, reports)
+	}
+	raws, rejected := shaqr.Decode(out)
+	if len(raws) != n || rejected != nil {
+		t.Fatalf("split %q gave %d shares, %v", args, len(raws), rejected)
+	}
+	h, _ := shaqr.ParseHeader(raws[0])
+	set := fmt.Sprintf("set %s (%d-of-%d, sealed)", h.Tag(), k, n)
+	want := fmt.Sprintf("# %s, %d bytes per share\n", set, len(raws[0]))
+	for i, raw := range raws {
+		plates = append(plates, shaqr.Encode(raw))
+		want += fmt.Sprintf("# share %d of %s\n%s\n", i+1, set, plates[i])
+	}
+	if h.K != k || out != want {
+		t.Errorf("split %q printed\n%s\nwant\n%s", args, out, want)
+	}
+	return h.Tag(), plates
+}
+
+// -k and -n override the wallet's quorum, which they default to: a set is
+// not tied to the keys. A 3-of-5 wallet goes on 2-of-3 plates or on
+// 4-of-6, and any k of them give it back.
+func TestSplitOverride(t *testing.T) {
+	_, plates35 := cut(t, 3, 5)
+	if _, again := cut(t, 3, 5, "-k", "3", "-n", "5"); !reflect.DeepEqual(again, plates35) {
+		t.Errorf("-k 3 -n 5 cut other plates than the default")
+	}
+	// A derived set is a function of the wallet and k: another n cuts
+	// more or fewer of the same plates.
+	if _, four := cut(t, 3, 4, "-n", "4"); !reflect.DeepEqual(four, plates35[:4]) {
+		t.Errorf("-n 4 cut other plates than the first 4 of the default")
+	}
+	cut(t, 2, 5, "-k", "2")
+
+	tag23, plates23 := cut(t, 2, 3, "-k", "2", "-n", "3")
+	tag46, plates46 := cut(t, 4, 6, "-k", "4", "-n", "6")
+	if tag23 == tag46 {
+		t.Fatalf("the 2-of-3 and the 4-of-6 set share the tag %s", tag23)
+	}
+	for _, input := range []string{
+		plates23[0] + "\n" + plates23[2],
+		plates23[2] + "\n" + plates23[1],
+		plates46[5] + "\n" + plates46[0] + "\n" + plates46[3] + "\n" + plates46[2],
+		strings.Join(plates46[1:5], "\n"),
+	} {
+		got, reports, err := descbackup(input, "recover")
+		if err != nil || reports != "" || got != wallet35+"\n" {
+			t.Errorf("recover = %q, %q, %v", got, reports, err)
+		}
+	}
+	// Three plates of the 4-of-6 are too few, though three seeds sign.
+	_, reports, err := descbackup(strings.Join(plates46[:3], "\n"), "recover")
+	if err == nil || reports != "set "+tag46+": 3 of 4 shares: have shares 1, 2 and 3; add another plate of this set\n" {
+		t.Errorf("recover of 3 plates of the 4-of-6 = %q, %v", reports, err)
+	}
+
+	// No share tells n, and a set whose k is not the wallet's threshold
+	// was not cut at the wallet's quorum, so its name gives k alone.
+	input := plates23[0] + "\n" + plates23[1] + "\n" + strings.Join(plates46[:4], "\n")
+	out, reports, err := descbackup(input, "recover")
+	want := "line 1 of the output: set " + tag23 + " (2 needed, sealed)\nline 2 of the output: set " + tag46 + " (4 needed, sealed)\n"
+	if err != nil || out != wallet35+"\n"+wallet35+"\n" || reports != want {
+		t.Errorf("recover of the 2-of-3 and the 4-of-6 = %q, %q, %v", out, reports, err)
+	}
+}
+
+// Replace labels a share with the n of -n, or by default the wallet's
+// number of keys when the set's k is the wallet's threshold.
+func TestReplaceOverride(t *testing.T) {
+	tag23, plates23 := cut(t, 2, 3, "-k", "2", "-n", "3")
+	tag35, plates35 := cut(t, 3, 5)
+	two := plates23[0] + "\n" + plates23[2]
+	three := plates35[4] + "\n" + plates35[0] + "\n" + plates35[2]
+	for _, c := range []struct {
+		input   string
+		args    []string
+		out     string
+		reports string
+	}{
+		{two, []string{"2"}, "# share 2 of set " + tag23 + " (2 needed, sealed)\n" + plates23[1] + "\n", ""},
+		{two, []string{"-n", "3", "2"}, "# share 2 of set " + tag23 + " (2-of-3, sealed)\n" + plates23[1] + "\n", ""},
+		{two, []string{"-n", "5", "2"}, "# share 2 of set " + tag23 + " (2-of-5, sealed)\n" + plates23[1] + "\n", ""},
+		{three, []string{"4"}, "# share 4 of set " + tag35 + " (3-of-5, sealed)\n" + plates35[3] + "\n", ""},
+		{three, []string{"-n", "7", "4"}, "# share 4 of set " + tag35 + " (3-of-7, sealed)\n" + plates35[3] + "\n", ""},
+		{three, []string{"6"}, "# share 6 of set " + tag35 + " (3 needed, sealed)\n",
+			"share 6 is past plate 5 of set " + tag35 + ", the wallet's number of keys; if the set was cut with more plates, give -n with that number to label it\n"},
+	} {
+		out, reports, err := descbackup(c.input, append([]string{"replace"}, c.args...)...)
+		if err != nil || !strings.HasPrefix(out, c.out) || reports != c.reports {
+			t.Errorf("replace %q = %q, %q, %v", c.args, out, reports, err)
+		}
+	}
+	if _, _, err := descbackup(three, "replace", "-n", "2", "1"); err == nil || err.Error() != "-n 2: set "+tag35+" needs 3 plates, so it has at least 3" {
+		t.Errorf("replace -n 2 of a 3-of-5 set: %v", err)
+	}
+	if _, _, err := descbackup(two, "replace", "-n", "3", "4"); err == nil || err.Error() != "-n 3: share 4 is past the last plate of set "+tag23 {
+		t.Errorf("replace -n 3 4: %v", err)
 	}
 }
 
@@ -539,17 +681,18 @@ func TestReplace(t *testing.T) {
 	for _, format := range []string{"sealed", "open"} {
 		_, tag, plates := vector(t, format)
 		out, reports, err := descbackup(plates[2]+"\n"+plates[0], "replace", "2")
-		want := "# share 2 of set " + tag + " (2-of-3, " + format + "), key [73c5da0a]\n" + plates[1] + "\n"
+		want := "# share 2 of set " + tag + " (2-of-3, " + format + ")\n" + plates[1] + "\n"
 		if err != nil || reports != "" || out != want {
 			t.Errorf("replace 2 of the %s set = %q, %q, %v", format, out, reports, err)
 		}
 	}
 
-	// A fourth share goes on no key's plate.
+	// A fourth share is an extra plate of a set cut at the wallet's
+	// quorum.
 	_, tag, plates := vector(t, "sealed")
 	out, reports, err := descbackup(plates[0]+"\n"+plates[1], "replace", "4")
-	if err != nil || !strings.HasPrefix(out, "# share 4 of set "+tag+" (2-of-3, sealed)\nSHAQR:") ||
-		reports != "share 4 goes on no key's plate: the descriptor has 3 keys, so it is an extra plate of set "+tag+"\n" {
+	if err != nil || !strings.HasPrefix(out, "# share 4 of set "+tag+" (2 needed, sealed)\nSHAQR:") ||
+		reports != "share 4 is past plate 3 of set "+tag+", the wallet's number of keys; if the set was cut with more plates, give -n with that number to label it\n" {
 		t.Errorf("replace 4 = %q, %q, %v", out, reports, err)
 	}
 	raws, _ := shaqr.Decode(out)
@@ -569,11 +712,24 @@ func TestReplace(t *testing.T) {
 		}
 	}
 
-	// X is checked before anything is read.
-	for _, x := range []string{"0", "256", "-1", "two"} {
-		err := run([]string{"replace", x}, unread{t}, io.Discard, log.New(io.Discard, "", 0))
-		if !errors.Is(err, errUsage) || !strings.HasPrefix(err.Error(), "X must be a number from 1 to 255\n") {
-			t.Errorf("replace %s: %v", x, err)
+	// X and -n are checked before anything is read.
+	for _, c := range []struct {
+		args []string
+		err  string
+	}{
+		{[]string{"0"}, "X must be a number from 1 to 255\n"},
+		{[]string{"256"}, "X must be a number from 1 to 255\n"},
+		{[]string{"two"}, "X must be a number from 1 to 255\n"},
+		{[]string{"-n", "3", "0"}, "X must be a number from 1 to 255\n"},
+		// A negative number reads as a flag.
+		{[]string{"-1"}, "flag provided but not defined: -1\n"},
+		{[]string{"-n", "1", "2"}, "-n must be a number from 2 to 255\n"},
+		{[]string{"-n", "256", "2"}, "-n must be a number from 2 to 255\n"},
+		{[]string{"-n", "-3", "2"}, "-n must be a number from 2 to 255\n"},
+	} {
+		err := run(append([]string{"replace"}, c.args...), unread{t}, io.Discard, log.New(io.Discard, "", 0))
+		if !errors.Is(err, errUsage) || !strings.HasPrefix(err.Error(), c.err) {
+			t.Errorf("replace %q: %v", c.args, err)
 		}
 	}
 }
@@ -626,6 +782,9 @@ func TestUsage(t *testing.T) {
 		{"replace", "two"},
 		{"replace", "0"},
 		{"replace", "2", "3"},
+		{"replace", "2", "-n", "3"},
+		{"replace", "-n"},
+		{"replace", "-k", "2", "2"},
 	} {
 		if _, _, err := descbackup("", args...); !errors.Is(err, errUsage) {
 			t.Errorf("%q: %v, want the usage", args, err)

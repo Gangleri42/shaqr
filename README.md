@@ -116,6 +116,7 @@ checks the packed sizes.
 ```
 go run ./cmd/descbackup split < wallet.txt > plates.txt
 go run ./cmd/descbackup split -open < wallet.txt > plates.txt
+go run ./cmd/descbackup split -k 2 -n 3 < wallet.txt > plates.txt
 go run ./cmd/descbackup recover < plates.txt
 go run ./cmd/descbackup replace 2 < plates.txt
 go run ./cmd/descbackup -h
@@ -123,33 +124,38 @@ go run ./cmd/descbackup -h
 
 descbackup follows DESCRIPTOR.md. Split puts the descriptor in canonical
 form, packs it and cuts a derived set of it, so that it cuts the same
-plates from the same wallet every time. With -open it cuts an open set:
-every plate is 32 bytes shorter and shows part of the descriptor; the
+plates from the same wallet and k every time. With -open it cuts an open
+set: every plate is 32 bytes shorter and shows part of the descriptor; the
 first k plates hold slices of it, whole public keys among them. It refuses
 to cut an open set of a descriptor that holds a private key, an xprv, a
 tprv, a SLIP-132 form such as zprv or a WIF key, or a key whose text
 starts like one. It reads the descriptor from standard input, or from its
-argument, which leaves the keys in the shell's history. It takes k and n
-from a descriptor whose keys all sit in one multi and labels share x with
-its set, the quorum, the format and the fingerprint of the x-th key, or
-the last 8 characters of a key with no origin, as in
-`# share 1 of set #7B63 (2-of-3, sealed), key [28645006]`. For any other
-descriptor give -k and -n. It checks the origin and the path of every key
-and the base58check of every extended key, and warns when the descriptor
-has no checksum, since then nothing shows that it is the wallet's. A
-1-of-n descriptor makes no set, and split prints the descriptor that goes
-on every plate. Every other line it prints that is not a share starts with
-`#`. Recover reads its input as one text, in any case and wrapped over any
-number of lines. It reports every share it leaves out and why, by the line
-it starts on. Once the id and the content type pass and the payload
-unpacks, it prints the descriptor of every set it holds k shares of, with
-the checksum unpacking computes, byte for byte. It warns when that text is
-not a descriptor in canonical form, which no tool that follows
-DESCRIPTOR.md cuts, and prints it all the same. A payload that fails to
-unpack, or unpacks to text that packs to other bytes, is reported and
-printed nowhere. Where two texts claim one x and too few other x values
-remain, it tries each, and the id decides. Replace makes share x of the
-one set it holds k shares of. Messages name a set by its tag.
+argument, which leaves the keys in the shell's history. By default k and n
+are the wallet's quorum, which it reads from a descriptor whose keys all
+sit in one multi. -k and -n override either, since a set is not tied to
+the keys: a 3-of-5 wallet can go on 2-of-3 plates, or on more plates than
+it has keys. For any other descriptor give -k and -n. It labels share x
+with its set, the quorum of the set and the format, and names no key, as
+in `# share 1 of set #7B63 (2-of-3, sealed)`. The owner decides who keeps
+which plate. It checks the origin and the path of every key and the
+base58check of every extended key, and warns when the descriptor has no
+checksum, since then nothing shows that it is the wallet's. A k of 1, the
+default of a 1-of-n descriptor, makes no set, and split prints the
+descriptor that goes on every plate. Every other line it prints that is
+not a share starts with `#`. Recover reads its input as one text, in any
+case and wrapped over any number of lines. It reports every share it
+leaves out and why, by the line it starts on. Once the id and the content
+type pass and the payload unpacks, it prints the descriptor of every set
+it holds k shares of, with the checksum unpacking computes, byte for byte.
+It warns when that text is not a descriptor in canonical form, which no
+tool that follows DESCRIPTOR.md cuts, and prints it all the same. A
+payload that fails to unpack, or unpacks to text that packs to other
+bytes, is reported and printed nowhere. Where two texts claim one x and
+too few other x values remain, it tries each, and the id decides. Replace
+makes share x of the one set it holds k shares of. A share does not tell
+n, so its label gives the wallet's number of keys when the set's k is the
+wallet's threshold, or the n of `replace -n N X`. Messages name a set by
+its tag.
 
 ## Site
 
